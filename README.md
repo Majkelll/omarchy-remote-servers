@@ -403,6 +403,22 @@ enc=$(printf 'myid\x1fmyhost\x1f\x1f\x1f\x1f5')   # id, host, port, user, identi
 Fields are joined by `\x1f` (unit separator), never a space or tab. See the
 script's own header comment for the exact layout of each subcommand.
 
+## Requirements
+
+- [Omarchy](https://omarchy.org/) with `omarchy-shell` (the Quickshell bar).
+- `ssh` and `bash`, plus `ssh-keygen` and `ssh-copy-id` for
+  [Set up key](#set-up-key). All part of OpenSSH.
+- `timeout` from coreutils, which bounds every probe.
+- `omarchy-launch-terminal` for the console and the key setup, and
+  `omarchy-notification-send` for [Notifications](#notifications). Both ship
+  with a base Omarchy install.
+- `ping`, optionally. Without it the connectivity check reports `unknown` and
+  is treated as online, which costs you the offline banner and nothing else.
+
+On the far end a server needs nothing but a POSIX `sh` and a Linux `/proc`.
+No package is installed on either side, no daemon is started, nothing runs
+with elevated privileges, and nothing is left behind on the server.
+
 ## Development
 
 ```bash
