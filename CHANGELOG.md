@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.1.0 - 2026-09-08
+
+- **Removed: restarting a server.** Nothing here reboots a machine any more.
+  The reboot command, its form field, the row's Restart button, the
+  confirmation dialog, the `x` key and the `restart` IPC call are all gone.
+  The only thing this plugin sends a server unprompted is the read-only
+  probe; anything that changes a server now happens in a console you opened
+  yourself. A `rebootCommand` left in `servers.json` is ignored.
+- **A server that drops, or comes back, says so.** A desktop notification the
+  first time a server stops answering, and another when it answers again. A
+  server that stays down is reported once, not on every check, and a server's
+  first reading is a baseline rather than news. Turn it off with
+  `notifyOnChange`.
+- **A stop button.** One click, or `p`, stops every check. The bar icon dims,
+  a banner says so, and each row reads "Checks paused" rather than showing a
+  number nothing is refreshing. The choice is written to `servers.json`, so
+  it survives a restart of the shell. Also `pause`, `resume` and
+  `togglePaused` over IPC.
+- **It can tell your servers being gone from your network being gone.**
+  Before touching any server, `stats-all` checks whether the machine can
+  reach the internet at all, the same host Omarchy's own network status
+  probes and the same way. With no connection the popup says it once at the
+  top, every row reads "No connection, checks paused" instead of claiming an
+  outage of its own, and no notification is sent for a failure that is not
+  about the server.
+  - A server that answered overrules the probe, so a LAN server reachable
+    without internet never triggers the banner.
+  - A probe that cannot run at all reports `unknown` and is read as online: a
+    probe that could not run must never be the reason a real outage goes
+    unreported.
+
 ## 1.0.0 - 2026-09-07
 
 - First release: keep a list of your own SSH servers in the Omarchy bar. The

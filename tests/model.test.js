@@ -93,7 +93,6 @@ describe("normalizeServer", () => {
     assert.equal(s.port, 0)
     assert.equal(s.user, "")
     assert.equal(s.identityFile, "")
-    assert.equal(s.rebootCommand, Model.DEFAULT_REBOOT_COMMAND)
     assert.equal(s.connectTimeoutSec, Model.DEFAULT_TIMEOUT)
   })
 
@@ -157,6 +156,14 @@ describe("parseConfig", () => {
     assert.deepEqual(parsed.servers, servers)
   })
 
+  test("carries the paused flag both ways", () => {
+    assert.equal(Model.parseConfig(Model.serializeConfig(servers, true)).paused, true)
+    assert.equal(Model.parseConfig(Model.serializeConfig(servers, false)).paused, false)
+    // Anything but a literal true means running.
+    assert.equal(Model.parseConfig('{"paused":"yes","servers":[]}').paused, false)
+    assert.equal(Model.parseConfig('{"servers":[]}').paused, false)
+  })
+
   test("reads a bare array as well as a {servers: []} document", () => {
     const parsed = Model.parseConfig(JSON.stringify([{ name: "web", host: "web.example.com" }]))
     assert.equal(parsed.error, "")
@@ -164,8 +171,8 @@ describe("parseConfig", () => {
   })
 
   test("an empty file is the first-run state, not an error", () => {
-    assert.deepEqual(Model.parseConfig(""), { servers: [], error: "" })
-    assert.deepEqual(Model.parseConfig("   \n"), { servers: [], error: "" })
+    assert.deepEqual(Model.parseConfig(""), { servers: [], paused: false, error: "" })
+    assert.deepEqual(Model.parseConfig("   \n"), { servers: [], paused: false, error: "" })
   })
 
   test("reports why a hand-edited file could not be read", () => {
@@ -188,7 +195,7 @@ describe("serializeConfig", () => {
     const doc = JSON.parse(text)
     assert.equal(doc.version, 1)
     assert.deepEqual(Object.keys(doc.servers[0]).sort(), [
-      "connectTimeoutSec", "host", "id", "identityFile", "name", "port", "rebootCommand", "user"
+      "connectTimeoutSec", "host", "id", "identityFile", "name", "port", "user"
     ])
   })
 
@@ -298,8 +305,6 @@ describe("ssh arguments", () => {
   test("passes one field per argv element", () => {
     assert.deepEqual(Model.connectArgs(server),
       ["prod.example.com", "2222", "deploy", "~/.ssh/prod_key", "8"])
-    assert.deepEqual(Model.restartArgs(server),
-      ["prod.example.com", "2222", "deploy", "~/.ssh/prod_key", "8", "sudo reboot"])
   })
 
   test("a server relying on ~/.ssh/config carries no options at all", () => {
@@ -370,6 +375,93 @@ describe("parseStatsAll", () => {
   })
 })
 
+describe("parseNetwork", () => {
+  test("reads the connectivity line stats-all prints first", () => {
+    const line = ["#network", "online", "8.84"].join(US)
+    assert.deepEqual(Model.parseNetwork(line), { known: true, online: true, detail: "8.84" })
+  })
+
+  test("reads an offline verdict and its reason", () => {
+    const line = ["#network", "offline", "no route to the internet"].join(US)
+    assert.deepEqual(Model.parseNetwork(line),
+      { known: true, online: false, detail: "no route to the internet" })
+  })
+
+  // A probe that could not run must never be the reason an outage goes
+  // unreported, so anything unreadable means "assume online".
+  test("assumes online when the verdict is unknown or absent", () => {
+    assert.deepEqual(Model.parseNetwork(["#network", "unknown", "ping is not installed"].join(US)),
+      { known: false, online: true, detail: "ping is not installed" })
+    assert.deepEqual(Model.parseNetwork(""), { known: false, online: true, detail: "" })
+    assert.deepEqual(Model.parseNetwork("srv1" + US + "err" + US + "unreachable"),
+      { known: false, online: true, detail: "" })
+  })
+
+  test("finds the line wherever it sits in the output", () => {
+    const out = ["a" + US + "err" + US + "timeout", ["#network", "offline", "x"].join(US)].join("\n")
+    assert.equal(Model.parseNetwork(out).online, false)
+  })
+})
+
+describe("batchWasOffline", () => {
+  const offline = { known: true, online: false, detail: "no route" }
+
+  test("believes the probe when nothing answered", () => {
+    assert.equal(Model.batchWasOffline(offline, { a: { reachable: false } }), true)
+    assert.equal(Model.batchWasOffline(offline, {}), true)
+  })
+
+  // A server on the LAN answers with no internet at all, and that is proof
+  // enough that the machine is not cut off.
+  test("a server that answered overrules the probe", () => {
+    assert.equal(Model.batchWasOffline(offline, { a: { reachable: false }, b: { reachable: true } }), false)
+  })
+
+  test("an online or unknown verdict is never an outage", () => {
+    assert.equal(Model.batchWasOffline({ known: true, online: true }, {}), false)
+    assert.equal(Model.batchWasOffline({ known: false, online: true }, {}), false)
+    assert.equal(Model.batchWasOffline(null, {}), false)
+  })
+})
+
+describe("transitions", () => {
+  const servers = [{ id: "a", name: "web-01", host: "web-01.internal", port: 0, user: "" }]
+  const up = { reachable: true }
+  const down = { reachable: false, error: "timeout" }
+
+  test("reports a server that stopped answering", () => {
+    const out = Model.transitions({ a: up }, { a: down }, servers)
+    assert.equal(out.length, 1)
+    assert.equal(out[0].transition, "down")
+    assert.equal(out[0].name, "web-01")
+    assert.equal(out[0].target, "web-01.internal")
+    assert.equal(out[0].reason, Model.errorText("timeout"))
+  })
+
+  test("reports a server that answered again", () => {
+    const out = Model.transitions({ a: down }, { a: up }, servers)
+    assert.equal(out.length, 1)
+    assert.equal(out[0].transition, "up")
+    assert.equal(out[0].reason, "")
+  })
+
+  test("says nothing when the state did not change", () => {
+    assert.deepEqual(Model.transitions({ a: up }, { a: up }, servers), [])
+    assert.deepEqual(Model.transitions({ a: down }, { a: down }, servers), [])
+  })
+
+  // The first answer after the popup opens is the baseline, not news.
+  test("a first reading is never a transition", () => {
+    assert.deepEqual(Model.transitions({}, { a: down }, servers), [])
+    assert.deepEqual(Model.transitions({}, { a: up }, servers), [])
+  })
+
+  test("ignores a server that is no longer on the list", () => {
+    assert.deepEqual(Model.transitions({ z: up }, { z: down }, servers), [])
+    assert.deepEqual(Model.transitions(null, null, null), [])
+  })
+})
+
 describe("formatting", () => {
   const stat = { reachable: true, cores: 8, load1: 1.6, memTotalKB: 16000000, memAvailKB: 9000000, uptimeSec: 93700 }
 
@@ -422,10 +514,27 @@ describe("summary and attentionCount", () => {
     assert.equal(Model.summary([{ id: "a" }, { id: "b" }], { a: up, b: down }), "2 servers · 1 unreachable")
   })
 
+  test("says paused or offline instead of counting a stale reading", () => {
+    assert.equal(Model.summary([{ id: "a" }], { a: down }, true, false), "1 server, checks paused")
+    assert.equal(Model.summary([{ id: "a" }], { a: down }, false, true), Model.OFFLINE_TEXT)
+    // Paused outranks offline: the checks stopped before the network did.
+    assert.equal(Model.summary([{ id: "a" }], { a: down }, true, true), "1 server, checks paused")
+    // With nothing on the list there is nothing to be paused about.
+    assert.equal(Model.summary([], {}, true, true), "No servers yet")
+  })
+
   test("counts only what actually needs attention", () => {
     assert.equal(Model.attentionCount([{ id: "a" }, { id: "b" }], { a: up, b: down }), 1)
     assert.equal(Model.attentionCount([{ id: "a" }], {}), 0)
     assert.equal(Model.attentionCount(null, null), 0)
+  })
+
+  test("nothing needs attention while paused or offline", () => {
+    const servers = [{ id: "a" }, { id: "b" }]
+    const stats = { a: down, b: down }
+    assert.equal(Model.attentionCount(servers, stats), 2)
+    assert.equal(Model.attentionCount(servers, stats, true, false), 0)
+    assert.equal(Model.attentionCount(servers, stats, false, true), 0)
   })
 
   test("a server with no reading yet needs no attention", () => {

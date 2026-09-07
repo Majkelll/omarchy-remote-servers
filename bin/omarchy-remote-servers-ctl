@@ -6,25 +6,30 @@
 # ~/.ssh/config, its own default port, its own default identity.
 #
 #   connect   <host> <port> <user> <identity> <timeout>
-#   restart   <host> <port> <user> <identity> <timeout> <reboot-command>
 #   setup-key <host> <port> <user> <identity> <timeout>
 #   stats-all <probe-script> <server>...
 #
 # `stats-all` takes each server as id\x1fhost\x1fport\x1fuser\x1fidentity\x1ftimeout
-# in one argv element, and prints one line per server in whatever order they
-# finish:
+# in one argv element. It prints one connectivity line first, then one line per
+# server in whatever order they finish:
+#   #network \x1f online|offline|unknown \x1f latency-ms|reason
 #   id \x1f ok  \x1f hostname \x1f cores \x1f load1 \x1f memTotalKB \x1f memAvailKB \x1f uptimeSec
 #   id \x1f err \x1f code
 
 set -uo pipefail
 
 readonly FS=$'\x1f'
+readonly NETWORK_MARKER='#network'
 readonly HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly SESSION="$HERE/omarchy-remote-servers-session"
 readonly DEFAULT_TIMEOUT=5
 readonly MAX_SERVERS=64
 readonly PROBE_GRACE_SEC=3
 readonly MAX_ERROR_CHARS=200
+# The host Omarchy's own `omarchy-network-status` probes, reached the same way,
+# so this plugin agrees with the network widget about whether you are online.
+# Overridable for networks that blackhole it, and for testing.
+readonly INTERNET_PROBE=${OMARCHY_REMOTE_SERVERS_PROBE:-1.1.1.1}
 
 die() {
   printf '%s\n' "$1" >&2
@@ -72,26 +77,6 @@ cmd_connect() {
   build_ssh_opts "$port" "$identity" "$(valid_timeout "$timeout")"
 
   omarchy-launch-terminal -- ssh "${ssh_opts[@]}" -- "$target" &
-  disown
-}
-
-# ------------------------------------------------------------------- restart
-
-cmd_restart() {
-  local host=$1 port=$2 user=$3 identity=$4 timeout=$5 reboot_cmd=$6
-  require ssh ssh-missing
-  [[ -n $host ]] || die "no-host"
-  [[ -n $reboot_cmd ]] || die "no-command"
-  require omarchy-launch-terminal terminal-missing
-  [[ -x $SESSION ]] || die "session-missing"
-
-  local target
-  target=$(build_target "$host" "$user")
-
-  local -a ssh_opts
-  build_ssh_opts "$port" "$identity" "$(valid_timeout "$timeout")"
-
-  omarchy-launch-terminal -- "$SESSION" restart "$target" "$reboot_cmd" "${ssh_opts[@]}" &
   disown
 }
 
@@ -165,12 +150,41 @@ probe_one() {
   fi
 }
 
+# Runs before any server is touched. With the machine itself offline every
+# server fails at once, and the panel needs to tell "the network is gone" from
+# "these servers are gone". Reports `unknown` rather than guessing when ping is
+# unavailable: a probe that cannot run must not be read as an outage.
+probe_connectivity() {
+  local latency
+
+  if ! ip route get "$INTERNET_PROBE" >/dev/null 2>&1; then
+    printf '%s%soffline%sno route to the internet\n' "$NETWORK_MARKER" "$FS" "$FS"
+    return
+  fi
+
+  if ! command -v ping >/dev/null 2>&1; then
+    printf '%s%sunknown%sping is not installed\n' "$NETWORK_MARKER" "$FS" "$FS"
+    return
+  fi
+
+  latency=$(LC_ALL=C ping -n -c 1 -W 1 "$INTERNET_PROBE" 2>/dev/null |
+    awk -F'time[=<]' '/time[=<]/ { split($2, parts, " "); print parts[1]; exit }')
+
+  if [[ -z $latency ]]; then
+    printf '%s%soffline%sno answer from %s\n' "$NETWORK_MARKER" "$FS" "$FS" "$INTERNET_PROBE"
+  else
+    printf '%s%sonline%s%s\n' "$NETWORK_MARKER" "$FS" "$FS" "$latency"
+  fi
+}
+
 cmd_stats_all() {
   local probe_script=${1:-}
   [[ $# -gt 0 ]] && shift
   require ssh ssh-missing
   require timeout timeout-missing
   [[ -f $probe_script ]] || die "probe-missing"
+
+  probe_connectivity
 
   local count=0 enc
   for enc in "$@"; do
@@ -189,7 +203,6 @@ main() {
 
   case "$cmd" in
     connect) cmd_connect "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
-    restart) cmd_restart "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
     setup-key) cmd_setup_key "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
     stats-all) cmd_stats_all "$@" ;;
     *) die "unknown-command" ;;

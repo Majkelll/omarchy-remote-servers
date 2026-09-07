@@ -21,22 +21,32 @@ BarWidget {
   property string configError: ""
   property string actionError: ""
 
-  // Set by the `restart` IPC call. The panel watches it and puts the
-  // confirmation on screen itself, so a keybinding cannot skip the dialog
-  // that a click on the row's own Restart button goes through.
-  property string pendingRestart: ""
+  // Persisted in servers.json, so stopping the checks survives a restart of
+  // the shell rather than quietly resuming behind your back.
+  property bool paused: false
+
+  property bool networkOffline: false
+  property string networkDetail: ""
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
-  readonly property int attentionCount: Model.attentionCount(root.servers, root.stats)
+  readonly property int attentionCount:
+    Model.attentionCount(root.servers, root.stats, root.paused, root.networkOffline)
 
   readonly property int statsRefreshSec: Math.max(10, Number(root.setting("statsRefreshSec", 20)) || 20)
+  readonly property bool notifyOnChange: root.setting("notifyOnChange", true) !== false
+
+  readonly property string omarchyPath: Quickshell.env("OMARCHY_PATH")
+  readonly property string notifyCommand:
+    (omarchyPath === "" ? "" : omarchyPath + "/bin/") + "omarchy-notification-send"
 
   readonly property string tooltip: root.configError !== ""
     ? ("servers.json: " + root.configError)
-    : Model.summary(root.servers, root.stats)
+    : (root.networkOffline && root.networkDetail !== ""
+      ? Model.OFFLINE_TEXT + " (" + root.networkDetail + ")"
+      : Model.summary(root.servers, root.stats, root.paused, root.networkOffline))
 
   readonly property var mirroredProperties: ["bar", "settings", "servers", "stats",
-    "configError", "actionError", "pendingRestart"]
+    "configError", "actionError", "paused", "networkOffline", "networkDetail"]
 
   function injectPanel() {
     var target = panelLoader.item
@@ -54,6 +64,7 @@ BarWidget {
   function loadConfig(raw) {
     var parsed = Model.parseConfig(raw)
     root.configError = parsed.error
+    root.paused = parsed.paused
     // A file that fails to parse keeps the servers already in memory.
     // Dropping them mid-edit is worse than showing the error over the list.
     if (parsed.error === "" || root.servers.length === 0) root.servers = parsed.servers
@@ -63,7 +74,20 @@ BarWidget {
 
   function writeConfig() {
     ensureDirProc.running = true
-    configFile.setText(Model.serializeConfig(root.servers))
+    configFile.setText(Model.serializeConfig(root.servers, root.paused))
+  }
+
+  function setPaused(next) {
+    if (root.paused === next) return
+    root.paused = next
+    if (next) {
+      // Whatever was on screen was true when the checks stopped, not now.
+      root.networkOffline = false
+      root.networkDetail = ""
+    }
+    root.writeConfig()
+    root.injectPanel()
+    if (!next) root.refreshStats()
   }
 
   function saveServers(next) {
@@ -111,13 +135,6 @@ BarWidget {
     Quickshell.execDetached([root.ctlPath, "connect"].concat(Model.connectArgs(server)))
   }
 
-  function restart(id) {
-    var server = Model.findServer(root.servers, id)
-    if (!server) return
-    root.actionError = ""
-    Quickshell.execDetached([root.ctlPath, "restart"].concat(Model.restartArgs(server)))
-  }
-
   // Generates a key if there isn't one and copies it to the server. The
   // account's existing password is asked for once, in the terminal, by
   // ssh-copy-id itself. Nothing here ever sees it.
@@ -126,19 +143,6 @@ BarWidget {
     if (!server) return
     root.actionError = ""
     Quickshell.execDetached([root.ctlPath, "setup-key"].concat(Model.connectArgs(server)))
-  }
-
-  function requestRestart(id) {
-    root.pendingRestart = id
-    root.injectPanel()
-    root.open()
-  }
-
-  // Called by the panel once the confirmation is on screen, so the same
-  // request cannot re-open the dialog on every mirror tick.
-  function clearPendingRestart() {
-    root.pendingRestart = ""
-    root.injectPanel()
   }
 
   function serverByName(name) {
@@ -151,11 +155,6 @@ BarWidget {
   function connectByName(name) {
     var server = root.serverByName(name)
     if (server) root.connect(server.id)
-  }
-
-  function restartByName(name) {
-    var server = root.serverByName(name)
-    if (server) root.requestRestart(server.id)
   }
 
   function setupKeyByName(name) {
@@ -178,7 +177,7 @@ BarWidget {
   // trips are network-bound, so five servers one after another would mean
   // waiting out five timeouts instead of one.
   function refreshServers(list) {
-    if (!root.opened || list.length === 0 || statsProc.running) return
+    if (root.paused || !root.opened || list.length === 0 || statsProc.running) return
     var args = [root.ctlPath, "stats-all", root.probePath]
     for (var i = 0; i < list.length; i++) args.push(Model.statsEncode(list[i]))
     statsProc.command = args
@@ -188,11 +187,39 @@ BarWidget {
   function applyStats(text, code) {
     if (code !== 0 && text === "") return
     var parsed = Model.parseStatsAll(text)
+    var network = Model.parseNetwork(text)
+    var offline = Model.batchWasOffline(network, parsed)
+
+    var previous = root.stats
     var next = {}
-    for (var key in root.stats) next[key] = root.stats[key]
+    for (var key in previous) next[key] = previous[key]
     for (var id in parsed) next[id] = parsed[id]
+
+    root.networkOffline = offline
+    root.networkDetail = offline ? network.detail : ""
     root.stats = next
     root.injectPanel()
+
+    // With the machine itself offline every server fails at once, and none of
+    // those failures is news about the server.
+    if (!offline) root.announce(Model.transitions(previous, next, root.servers))
+  }
+
+  // ----------------------------------------------------------- notifications
+
+  function announce(changes) {
+    if (!root.notifyOnChange) return
+    for (var i = 0; i < changes.length; i++) root.notify(changes[i])
+  }
+
+  function notify(change) {
+    var down = change.transition === "down"
+    Quickshell.execDetached([root.notifyCommand,
+      "--app-name", "omarchy-remote-servers",
+      "-g", down ? Model.GLYPH.serverOff : Model.GLYPH.server,
+      "-u", down ? "critical" : "low",
+      change.name + (down ? " is unreachable" : " is back"),
+      down ? change.target + ", " + change.reason : "Answered again on " + change.target])
   }
 
   // --------------------------------------------------------------- lifecycle
@@ -226,7 +253,7 @@ BarWidget {
   Timer {
     interval: root.statsRefreshSec * 1000
     repeat: true
-    running: root.opened
+    running: root.opened && !root.paused
     onTriggered: root.refreshStats()
   }
 
@@ -270,7 +297,9 @@ BarWidget {
 
   IpcHandler {
     target: "io.github.majkelll.omarchy-remote-servers"
-    function list(): string { return Model.summary(root.servers, root.stats) }
+    function list(): string {
+      return Model.summary(root.servers, root.stats, root.paused, root.networkOffline)
+    }
     function refresh(): void { root.refreshStats() }
     function open(): void { root.open() }
     function close(): void { root.close() }
@@ -279,8 +308,9 @@ BarWidget {
     function toggle(): void { root.toggle() }
     function connect(name: string): void { root.connectByName(name) }
     function setupKey(name: string): void { root.setupKeyByName(name) }
-    // Asks rather than restarts, same as a click on the row's own button.
-    function restart(name: string): void { root.restartByName(name) }
+    function pause(): void { root.setPaused(true) }
+    function resume(): void { root.setPaused(false) }
+    function togglePaused(): void { root.setPaused(!root.paused) }
   }
 
   WidgetButton {
@@ -290,7 +320,7 @@ BarWidget {
     text: root.attentionCount > 0 ? Model.GLYPH.serverOff : Model.GLYPH.server
     fontSize: Style.font.icon
     active: root.attentionCount > 0 || root.configError !== ""
-    dimmed: root.servers.length === 0 && root.configError === ""
+    dimmed: root.paused || (root.servers.length === 0 && root.configError === "")
     tooltipText: root.tooltip
     onPressed: function(mouseButton) {
       if (mouseButton === Qt.RightButton) {

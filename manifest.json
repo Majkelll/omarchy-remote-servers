@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.majkelll.omarchy-remote-servers",
   "name": "Remote servers",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Majkelll",
   "license": "MIT",
-  "description": "Keep a list of your own SSH servers in the bar: open a console, restart one, and watch live load/RAM/uptime per server. One button sets up key-based auth, so no password is ever stored or asked for again.",
+  "description": "Keep a list of your own SSH servers in the bar: open a console, watch live load/RAM/uptime, and get told when one drops or comes back. One button sets up key-based auth, so no password is ever stored or asked for again.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Remote servers",
-    "description": "Connect, restart, and watch load/RAM/uptime for the SSH servers you list.",
+    "description": "Connect to the SSH servers you list and watch their load, RAM and uptime.",
     "category": "System",
     "aliases": [
       "ssh",
@@ -24,7 +24,8 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "statsRefreshSec": 20
+      "statsRefreshSec": 20,
+      "notifyOnChange": true
     },
     "schema": [
       {
@@ -36,6 +37,13 @@
         "step": 5,
         "defaultValue": 20,
         "description": "How often load/RAM is sampled over ssh while the popup is open. Not sampled at all while closed. Higher than a local plugin's default on purpose, since each sample is a network round trip rather than a local call."
+      },
+      {
+        "key": "notifyOnChange",
+        "type": "boolean",
+        "label": "Notify when a server drops or comes back",
+        "defaultValue": true,
+        "description": "Sends a desktop notification the first time a server stops answering, and again when it answers. A server's first reading is the baseline, not news, and nothing is sent while the checks are stopped or the machine itself is offline."
       }
     ]
   }

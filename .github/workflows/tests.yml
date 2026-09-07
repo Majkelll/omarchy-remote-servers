@@ -118,6 +118,13 @@ jobs:
           grep -qP '^ok1\x1fok\x1f' <<<"$out"
           grep -qP '^bad1\x1ferr\x1funreachable$' <<<"$out"
 
+          # The connectivity verdict leads the output and is one of three words.
+          head -1 <<<"$out" | grep -qP '^#network\x1f(online|offline|unknown)\x1f'
+
+          # A probe address nothing answers must read as offline, not silence.
+          off=$(OMARCHY_REMOTE_SERVERS_PROBE=192.0.2.1 timeout 15 "$CTL" stats-all "$PROBE" "$enc_bad")
+          head -1 <<<"$off" | grep -qP '^#network\x1foffline\x1f' 
+
           # The reachable line must carry every field Model.parseStatsAll needs.
           fields=$(grep -P '^ok1\x1f' <<<"$out" | awk -F'\x1f' '{print NF}')
           test "$fields" -eq 8
@@ -133,12 +140,6 @@ jobs:
           echo "--- connect: builds the right ssh invocation ---"
           out=$("$CTL" connect 127.0.0.1 2299 "" "$WORK/clientkey" 3 </dev/null 2>&1 || true)
           echo "$out"
-
-          echo "--- restart: runs the configured command over ssh, then waits for a key ---"
-          out=$("$CTL" restart 127.0.0.1 2299 "" "$WORK/clientkey" 3 "echo integration-test-ok" </dev/null)
-          echo "$out"
-          grep -q "integration-test-ok" <<<"$out"
-          grep -q "press any key to close" <<<"$out"
 
           # setup-key generates a key that does not exist yet and installs it.
           # The agent holds the key that authorizes the copy; the check inside

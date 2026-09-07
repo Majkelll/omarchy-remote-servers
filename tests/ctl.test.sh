@@ -54,11 +54,8 @@ check "no subcommand is an unknown subcommand" \
 check "connect without a host refuses" \
   "no-host" "$("$CTL" connect "" "" "" "" 5 2>&1 >/dev/null)"
 
-check "restart without a host refuses" \
-  "no-host" "$("$CTL" restart "" "" "" "" 5 "sudo reboot" 2>&1 >/dev/null)"
-
-check "restart without a command refuses" \
-  "no-command" "$("$CTL" restart host "" "" "" 5 "" 2>&1 >/dev/null)"
+check "restart is no longer a subcommand" \
+  "unknown-command" "$("$CTL" restart host "" "" "" 5 "sudo reboot" 2>&1 >/dev/null)"
 
 check "setup-key without a host refuses" \
   "no-host" "$("$CTL" setup-key "" "" "" "" 5 2>&1 >/dev/null)"
@@ -73,7 +70,20 @@ check "stats-all with no arguments at all refuses" \
 
 out=$(timeout 30 "$CTL" stats-all "$PROBE" "$(encode srv1 127.0.0.1 "$CLOSED_PORT" '' '' 2)")
 check "an unreachable host reports one err line" \
-  "srv1${FS}err${FS}unreachable" "$out"
+  "srv1${FS}err${FS}unreachable" "$(grep -v "^#network" <<<"$out")"
+
+check "a connectivity line comes first, before any server" \
+  "yes" "$(head -1 <<<"$out" | grep -q "^#network${FS}" && echo yes || echo no)"
+
+check "the connectivity verdict is one of three words" \
+  "yes" "$(head -1 <<<"$out" | cut -d"$FS" -f2 |
+    grep -qE '^(online|offline|unknown)$' && echo yes || echo no)"
+
+# An unroutable probe address must read as offline rather than as silence.
+out_off=$(OMARCHY_REMOTE_SERVERS_PROBE=192.0.2.1 timeout 30 "$CTL" stats-all "$PROBE" \
+  "$(encode srv1 127.0.0.1 "$CLOSED_PORT" '' '' 2)")
+check "an unanswering probe reports offline" \
+  "offline" "$(head -1 <<<"$out_off" | cut -d"$FS" -f2)"
 
 out=$(timeout 30 "$CTL" stats-all "$PROBE" \
   "$(encode a 127.0.0.1 "$CLOSED_PORT" '' '' 2)" \
@@ -90,15 +100,16 @@ check "two slow probes overlap rather than stack" \
   "under 8s" "$([[ $elapsed -lt 8 ]] && echo "under 8s" || echo "${elapsed}s")"
 
 check "a row with no id is skipped, not half-parsed" \
-  "" "$(timeout 30 "$CTL" stats-all "$PROBE" "$(encode '' 127.0.0.1 "$CLOSED_PORT" '' '' 2)")"
+  "" "$(timeout 30 "$CTL" stats-all "$PROBE" "$(encode '' 127.0.0.1 "$CLOSED_PORT" '' '' 2)" |
+    grep -v "^#network")"
 
 check "a row with no host is skipped, not half-parsed" \
-  "" "$(timeout 30 "$CTL" stats-all "$PROBE" "$(encode srv1 '' '' '' '' 2)")"
+  "" "$(timeout 30 "$CTL" stats-all "$PROBE" "$(encode srv1 '' '' '' '' 2)" | grep -v "^#network")"
 
 # The cap exists so a hand-edited servers.json cannot fork unboundedly.
 many=()
 for i in $(seq 1 70); do many+=("$(encode "s$i" 127.0.0.1 "$CLOSED_PORT" '' '' 2)"); done
-lines=$(timeout 60 "$CTL" stats-all "$PROBE" "${many[@]}" | grep -c .)
+lines=$(timeout 60 "$CTL" stats-all "$PROBE" "${many[@]}" | grep -vc "^#network")
 check "no more than 64 servers are probed" 64 "$lines"
 
 # ------------------------------------------------------------------- probe
@@ -131,6 +142,9 @@ check "the terminal helper parses" 0 "$(bash -n "$SESSION" >/dev/null 2>&1; echo
 
 check "the terminal helper rejects an unknown subcommand" \
   "unknown-command" "$("$SESSION" bogus 2>&1 >/dev/null </dev/null)"
+
+check "the terminal helper no longer restarts anything" \
+  "unknown-command" "$("$SESSION" restart target "sudo reboot" 2>&1 >/dev/null </dev/null)"
 
 check "ctl refuses to launch a terminal when its helper is missing" \
   "session-missing" "$(PATH="$ROOT/tests:$PATH" bash -c '

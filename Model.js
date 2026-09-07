@@ -8,14 +8,20 @@ var MAX_FIELD = 512
 var MIN_TIMEOUT = 2
 var MAX_TIMEOUT = 60
 var DEFAULT_TIMEOUT = 5
-var DEFAULT_REBOOT_COMMAND = "sudo reboot"
+
+// The panel says all three of these, and they are three different things.
+var OFFLINE_TEXT = "No connection, checks paused"
+var PAUSED_TEXT = "Checks paused"
+var NETWORK_MARKER = "#network"
 
 var GLYPH = {
   server: "󰒋",
   serverOff: "󰒏",
   console: "󰆍",
-  restart: "󰑓",
   key: "󰌆",
+  pause: "󰏤",
+  play: "󰐊",
+  offline: "󰖪",
   remove: "󰩺",
   add: "󰐕",
   edit: "󰏫",
@@ -107,7 +113,6 @@ function normalizeServer(raw, taken) {
     port: normalizePort(source.port),
     user: isSafeOptionValue(source.user) ? clip(source.user) : "",
     identityFile: isSafeOptionValue(source.identityFile) ? clip(source.identityFile) : "",
-    rebootCommand: clip(source.rebootCommand) || DEFAULT_REBOOT_COMMAND,
     connectTimeoutSec: clamp(toInt(source.connectTimeoutSec, DEFAULT_TIMEOUT), MIN_TIMEOUT, MAX_TIMEOUT)
   }
   if (server.id === "" || (taken && taken.indexOf(server.id) !== -1))
@@ -133,23 +138,27 @@ function normalizeServers(list) {
 // message rather than as an empty list.
 function parseConfig(text) {
   var raw = String(text === undefined || text === null ? "" : text).slice(0, MAX_INPUT).trim()
-  if (raw === "") return { servers: [], error: "" }
+  if (raw === "") return { servers: [], paused: false, error: "" }
 
   var parsed
   try {
     parsed = JSON.parse(raw)
   } catch (error) {
-    return { servers: [], error: "servers.json is not valid JSON" }
+    return { servers: [], paused: false, error: "servers.json is not valid JSON" }
   }
 
   var list = Array.isArray(parsed)
     ? parsed
     : (parsed && Array.isArray(parsed.servers) ? parsed.servers : null)
-  if (list === null) return { servers: [], error: "servers.json has no servers array" }
-  return { servers: normalizeServers(list), error: "" }
+  if (list === null) return { servers: [], paused: false, error: "servers.json has no servers array" }
+  return {
+    servers: normalizeServers(list),
+    paused: !!(parsed && parsed.paused === true),
+    error: ""
+  }
 }
 
-function serializeConfig(servers) {
+function serializeConfig(servers, paused) {
   var rows = []
   var list = Array.isArray(servers) ? servers : []
   for (var i = 0; i < list.length; i++) {
@@ -161,11 +170,10 @@ function serializeConfig(servers) {
       port: server.port,
       user: server.user,
       identityFile: server.identityFile,
-      rebootCommand: server.rebootCommand,
       connectTimeoutSec: server.connectTimeoutSec
     })
   }
-  return JSON.stringify({ version: 1, servers: rows }, null, 2) + "\n"
+  return JSON.stringify({ version: 1, paused: paused === true, servers: rows }, null, 2) + "\n"
 }
 
 // Returns "" when the form can be saved, or the reason it cannot.
@@ -268,16 +276,40 @@ function connectArgs(server) {
   ]
 }
 
-function restartArgs(server) {
-  return connectArgs(server).concat([server.rebootCommand || DEFAULT_REBOOT_COMMAND])
-}
-
 // One \x1f-joined argv element per server for the batched stats-all call.
 function statsEncode(server) {
   return [server.id].concat(connectArgs(server)).join("\x1f")
 }
 
 // -------------------------------------------------------------------- stats
+
+// The connectivity line stats-all emits before it probes anything. Absent or
+// unreadable means "assume online": a probe that could not run must never be
+// the reason a real outage goes unreported.
+function parseNetwork(raw) {
+  var lines = clean(raw).slice(0, MAX_INPUT).split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var f = lines[i].split("\x1f")
+    if (clean(f[0]) !== NETWORK_MARKER) continue
+    var state = clean(f[1])
+    return {
+      known: state === "online" || state === "offline",
+      online: state !== "offline",
+      detail: clip(f.length > 2 ? f[2] : "")
+    }
+  }
+  return { known: false, online: true, detail: "" }
+}
+
+// The probe can be wrong: a server on the LAN answers with no internet at all,
+// and a captive portal answers everything. A server that replied is proof
+// enough, so a reachable server anywhere in the batch overrules the probe.
+function batchWasOffline(network, statsById) {
+  if (!network || !network.known || network.online) return false
+  var stats = statsById || {}
+  for (var id in stats) if (stats[id].reachable) return false
+  return true
+}
 
 // stats-all prints one line per server:
 //   id \x1f ok \x1f hostname \x1f cores \x1f load1 \x1f memTotalKB \x1f memAvailKB \x1f uptimeSec
@@ -292,7 +324,7 @@ function parseStatsAll(raw) {
     var f = lines[i].split("\x1f")
     if (f.length < 3) continue
     var id = clip(f[0])
-    if (id === "") continue
+    if (id === "" || id === NETWORK_MARKER) continue
 
     if (f[1] === "ok" && f.length >= 8) {
       byId[id] = {
@@ -359,13 +391,40 @@ function rowStatLine(stat) {
     " · up " + formatUptime(stat.uptimeSec)
 }
 
+// The only place that decides a server changed state. A server with no
+// previous reading transitions into nothing: the first answer after the popup
+// opens is not news, it is the baseline.
+function transitions(previousById, nextById, servers) {
+  var before = previousById || {}
+  var after = nextById || {}
+  var list = Array.isArray(servers) ? servers : []
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var id = list[i].id
+    var was = before[id]
+    var now = after[id]
+    if (!was || !now) continue
+    if (was.reachable === now.reachable) continue
+    out.push({
+      id: id,
+      name: list[i].name,
+      target: targetLabel(list[i]),
+      transition: now.reachable ? "up" : "down",
+      reason: now.reachable ? "" : errorText(now.error)
+    })
+  }
+  return out
+}
+
 function needsAttention(stat) {
   return !!stat && stat.reachable === false
 }
 
-function summary(servers, statsById) {
+function summary(servers, statsById, paused, offline) {
   var list = Array.isArray(servers) ? servers : []
   if (list.length === 0) return "No servers yet"
+  if (paused) return list.length + (list.length === 1 ? " server" : " servers") + ", " + PAUSED_TEXT.toLowerCase()
+  if (offline) return OFFLINE_TEXT
   var stats = statsById || {}
   var down = 0
   var known = 0
@@ -381,7 +440,10 @@ function summary(servers, statsById) {
   return text
 }
 
-function attentionCount(servers, statsById) {
+// While paused or offline every reading is a memory rather than a reading, so
+// nothing is reported as needing attention on the strength of one.
+function attentionCount(servers, statsById, paused, offline) {
+  if (paused || offline) return 0
   var list = Array.isArray(servers) ? servers : []
   var stats = statsById || {}
   var n = 0
@@ -415,7 +477,9 @@ if (typeof module !== "undefined") {
     MIN_TIMEOUT: MIN_TIMEOUT,
     MAX_TIMEOUT: MAX_TIMEOUT,
     DEFAULT_TIMEOUT: DEFAULT_TIMEOUT,
-    DEFAULT_REBOOT_COMMAND: DEFAULT_REBOOT_COMMAND,
+    OFFLINE_TEXT: OFFLINE_TEXT,
+    PAUSED_TEXT: PAUSED_TEXT,
+    NETWORK_MARKER: NETWORK_MARKER,
     GLYPH: GLYPH,
     clean: clean,
     clip: clip,
@@ -436,9 +500,11 @@ if (typeof module !== "undefined") {
     indexOfName: indexOfName,
     targetLabel: targetLabel,
     connectArgs: connectArgs,
-    restartArgs: restartArgs,
     statsEncode: statsEncode,
+    parseNetwork: parseNetwork,
+    batchWasOffline: batchWasOffline,
     parseStatsAll: parseStatsAll,
+    transitions: transitions,
     loadPercent: loadPercent,
     formatPercent: formatPercent,
     formatMemPair: formatMemPair,

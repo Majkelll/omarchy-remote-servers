@@ -16,14 +16,16 @@ Panel {
   property var stats: ({})
   property string configError: ""
   property string actionError: ""
-  property string pendingRestart: ""
+  property bool paused: false
+  property bool networkOffline: false
+  property string networkDetail: ""
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.45)
   readonly property color faint: Qt.darker(foreground, 1.7)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  // Wide enough for the longest label in the form ("Reboot command") to sit
+  // Wide enough for the longest label in the form ("Identity file") to sit
   // on one line beside its input rather than running under it.
   readonly property real labelColumn: Style.space(110)
   readonly property real dotColumn: Style.space(18)
@@ -37,20 +39,17 @@ Panel {
   property string draftPort: ""
   property string draftUser: ""
   property string draftIdentityFile: ""
-  property string draftRebootCommand: ""
   property string draftTimeoutSec: ""
   property string formError: ""
   property bool advancedOpen: false
 
   property string expandedId: ""
-  property string confirmId: ""
-  property bool confirmOpened: false
-  readonly property var confirmServer: Model.findServer(root.servers, root.confirmId)
 
   property int selectedIndex: 0
   property bool cursorActive: false
 
   function colorForRow(server) {
+    if (root.stale) return root.faint
     var stat = root.stats[server.id]
     if (Model.needsAttention(stat)) return Color.urgent
     if (stat && stat.reachable) return Color.accent
@@ -65,8 +64,6 @@ Panel {
   function close() {
     root.controller.hide()
     root.cursorActive = false
-    root.confirmOpened = false
-    root.confirmId = ""
     root.expandedId = ""
     root.cancelForm()
   }
@@ -76,31 +73,15 @@ Panel {
     else root.open()
   }
 
-  // An IPC `restart` asks, the same way the row's own button does, then tells
-  // the host to forget it so it cannot re-fire on the next mirror tick.
-  onPendingRestartChanged: {
-    if (root.pendingRestart === "") return
-    root.askRestart(root.pendingRestart)
-    if (root.hostWidget) root.hostWidget.clearPendingRestart()
+  function togglePaused() {
+    if (root.hostWidget) root.hostWidget.setPaused(!root.paused)
   }
 
-  function askRestart(id) {
-    root.confirmId = id
-    root.confirmOpened = true
-    restartConfirm.selectedIndex = 0
-  }
-
-  function confirmRestart() {
-    var id = root.confirmId
-    root.confirmOpened = false
-    root.confirmId = ""
-    if (id !== "" && root.hostWidget) root.hostWidget.restart(id)
-  }
-
-  function cancelRestart() {
-    root.confirmOpened = false
-    root.confirmId = ""
-  }
+  // Paused or offline, every reading on screen is a memory rather than a
+  // reading, so no row is painted as though it just failed.
+  readonly property bool stale: root.paused || root.networkOffline
+  readonly property int attentionCount:
+    Model.attentionCount(root.servers, root.stats, root.paused, root.networkOffline)
 
   function toggleExpanded(id) {
     if (root.editingId !== "") return
@@ -145,7 +126,6 @@ Panel {
       port: root.draftPort,
       user: root.draftUser,
       identityFile: root.draftIdentityFile,
-      rebootCommand: root.draftRebootCommand,
       connectTimeoutSec: root.draftTimeoutSec
     }
   }
@@ -157,7 +137,6 @@ Panel {
     root.draftPort = ""
     root.draftUser = ""
     root.draftIdentityFile = ""
-    root.draftRebootCommand = ""
     root.draftTimeoutSec = ""
     root.formError = ""
     root.advancedOpen = false
@@ -172,13 +151,11 @@ Panel {
     root.draftPort = server.port > 0 ? String(server.port) : ""
     root.draftUser = server.user
     root.draftIdentityFile = server.identityFile
-    root.draftRebootCommand = server.rebootCommand
     root.draftTimeoutSec = String(server.connectTimeoutSec)
     root.formError = ""
     // Opens the section whenever something in it is already set, so nothing
     // already configured is hidden behind a collapsed disclosure.
     root.advancedOpen = server.port > 0 || server.user !== "" || server.identityFile !== ""
-      || server.rebootCommand !== Model.DEFAULT_REBOOT_COMMAND
       || server.connectTimeoutSec !== Model.DEFAULT_TIMEOUT
   }
 
@@ -381,11 +358,10 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      // Stands down whenever a text field owns the keyboard, or the confirm
-      // dialog is up and must own it instead.
+      // Stands down whenever a text field owns the keyboard.
       blocked: nameField.activeFocus || hostField.activeFocus || portField.activeFocus
-        || userField.activeFocus || identityField.activeFocus || rebootField.activeFocus
-        || timeoutField.activeFocus || root.confirmOpened
+        || userField.activeFocus || identityField.activeFocus
+        || timeoutField.activeFocus
       onMoveRequested: function(dx, dy) { root.moveCursor(dx !== 0 ? dx : dy) }
       onActivateRequested: root.activateCursor()
       onDeleteRequested: root.removeSelected()
@@ -399,13 +375,13 @@ Panel {
       onTextKey: function(text) {
         if (text === "a" || text === "A") { nameField.forceActiveFocus(); return }
         if (text === "r" || text === "R") { root.refresh(); return }
+        if (text === "p" || text === "P") { root.togglePaused(); return }
         var server = root.selectedServer()
         if (!server) return
         if (text === "c" || text === "C") root.connectTo(server.id)
         // Not "k": PanelKeyCatcher claims that one for moving up, and it
         // never reaches here.
         else if (text === "s" || text === "S") root.setupKey(server.id)
-        else if (text === "x" || text === "X") root.askRestart(server.id)
         else if (text === "e" || text === "E") root.startEdit(server)
       }
 
@@ -436,29 +412,47 @@ Panel {
 
           PanelHero {
             title: "Remote servers"
-            meta: Model.summary(root.servers, root.stats)
+            meta: root.configError !== ""
+              ? "servers.json cannot be read"
+              : Model.summary(root.servers, root.stats, root.paused, root.networkOffline)
             foreground: root.foreground
             fontFamily: root.fontFamily
 
+            readonly property bool alarmed: root.configError !== "" || root.attentionCount > 0
+
             iconComponent: Component {
               Text {
-                text: root.configError !== "" || Model.attentionCount(root.servers, root.stats) > 0
-                  ? Model.GLYPH.serverOff : Model.GLYPH.server
-                color: root.configError !== "" || Model.attentionCount(root.servers, root.stats) > 0
-                  ? Color.urgent : root.foreground
+                text: root.paused ? Model.GLYPH.pause
+                  : (root.networkOffline ? Model.GLYPH.offline
+                    : (root.alarmed ? Model.GLYPH.serverOff : Model.GLYPH.server))
+                color: root.alarmed ? Color.urgent : (root.stale ? root.dim : root.foreground)
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.display
               }
             }
 
             trailingControl: Component {
-              PanelActionButton {
-                iconText: Model.GLYPH.refresh
-                tooltipText: "Refresh now"
-                foreground: root.foreground
-                hoverColor: Color.accent
-                fontFamily: root.fontFamily
-                onClicked: root.refresh()
+              Row {
+                spacing: Style.spacing.xs
+
+                PanelActionButton {
+                  iconText: root.paused ? Model.GLYPH.play : Model.GLYPH.pause
+                  tooltipText: root.paused ? "Start checking again" : "Stop checking"
+                  foreground: root.foreground
+                  hoverColor: Color.accent
+                  fontFamily: root.fontFamily
+                  onClicked: root.togglePaused()
+                }
+
+                PanelActionButton {
+                  iconText: Model.GLYPH.refresh
+                  tooltipText: "Refresh now"
+                  enabled: !root.paused && root.servers.length > 0
+                  foreground: root.foreground
+                  hoverColor: Color.accent
+                  fontFamily: root.fontFamily
+                  onClicked: root.refresh()
+                }
               }
             }
           }
@@ -469,6 +463,26 @@ Panel {
             glyph: Model.GLYPH.alert
             title: "servers.json"
             detail: root.configError
+          }
+
+          StateBanner {
+            visible: root.paused
+            tone: root.foreground
+            glyph: Model.GLYPH.pause
+            title: "Checks stopped"
+            detail: "Nothing is being checked, press play above to start again"
+          }
+
+          // Unmissable on purpose: while the machine is offline, every line
+          // below is the last thing that was known, not the current state.
+          StateBanner {
+            visible: !root.paused && root.networkOffline
+            tone: Color.urgent
+            glyph: Model.GLYPH.offline
+            title: "No connection"
+            detail: root.networkDetail === ""
+              ? "Checks are paused until it comes back"
+              : "Checks are paused, " + root.networkDetail
           }
 
           Text {
@@ -590,22 +604,6 @@ Panel {
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                   onTextChanged: root.draftIdentityFile = text
-                  onAccepted: root.submitForm()
-                  Keys.onEscapePressed: root.editingId === "" ? keyCatcher.forceActiveFocus() : root.cancelForm()
-                }
-              }
-
-              FormRow {
-                label: "Reboot command"
-                TextField {
-                  id: rebootField
-                  width: parent.width
-                  placeholderText: Model.DEFAULT_REBOOT_COMMAND
-                  text: root.draftRebootCommand
-                  foreground: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  onTextChanged: root.draftRebootCommand = text
                   onAccepted: root.submitForm()
                   Keys.onEscapePressed: root.editingId === "" ? keyCatcher.forceActiveFocus() : root.cancelForm()
                 }
@@ -773,12 +771,14 @@ Panel {
                         // Names what fixing it gets you, not just what is
                         // wrong: the fix is one row down, behind a click
                         // nobody would otherwise have a reason to try.
-                        text: root.needsKey(rowEntry.stat)
-                          ? "Set up a key to see load and RAM. Open this row."
-                          : (rowEntry.stat
-                            ? Model.rowStatLine(rowEntry.stat)
-                            : ("not checked yet · " + Model.targetLabel(rowEntry.modelData)))
-                        color: Model.needsAttention(rowEntry.stat) ? Color.urgent : root.faint
+                        text: root.paused ? Model.PAUSED_TEXT
+                          : (root.networkOffline ? Model.OFFLINE_TEXT
+                            : (root.needsKey(rowEntry.stat)
+                              ? "Set up a key to see load and RAM. Open this row."
+                              : (rowEntry.stat
+                                ? Model.rowStatLine(rowEntry.stat)
+                                : ("not checked yet · " + Model.targetLabel(rowEntry.modelData)))))
+                        color: !root.stale && Model.needsAttention(rowEntry.stat) ? Color.urgent : root.faint
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
                         elide: Text.ElideRight
@@ -798,15 +798,6 @@ Panel {
                         hoverColor: Color.accent
                         fontFamily: root.fontFamily
                         onClicked: root.connectTo(rowEntry.modelData.id)
-                      }
-
-                      PanelActionButton {
-                        iconText: Model.GLYPH.restart
-                        tooltipText: "Restart…"
-                        foreground: root.foreground
-                        hoverColor: Color.urgent
-                        fontFamily: root.fontFamily
-                        onClicked: root.askRestart(rowEntry.modelData.id)
                       }
                     }
                   }
@@ -831,8 +822,7 @@ Panel {
 
                   Text {
                     width: parent.width
-                    text: "Restart runs: " + rowEntry.modelData.rebootCommand
-                      + "  ·  " + rowEntry.modelData.connectTimeoutSec + "s timeout"
+                    text: rowEntry.modelData.connectTimeoutSec + "s connect timeout"
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -842,7 +832,7 @@ Panel {
                   // Said once, where the button is, because "why does this
                   // need a key at all" is the question the button raises.
                   Text {
-                    visible: root.keyUnconfirmed(rowEntry.stat)
+                    visible: !root.stale && root.keyUnconfirmed(rowEntry.stat)
                     width: parent.width
                     text: "Load and RAM are sampled in the background, where a "
                       + "password prompt has nowhere to appear, so reading them "
@@ -863,7 +853,7 @@ Panel {
                     Button {
                       text: "Set up key"
                       iconText: Model.GLYPH.key
-                      bordered: root.keyUnconfirmed(rowEntry.stat)
+                      bordered: !root.stale && root.keyUnconfirmed(rowEntry.stat)
                       foreground: root.foreground
                       fontFamily: root.fontFamily
                       fontSize: Style.font.caption
@@ -899,7 +889,7 @@ Panel {
           Text {
             text: root.servers.length === 0
               ? "a add · Esc close"
-              : "Enter details · c console · s set up key · x restart · e edit · Del remove · a add · r refresh · Esc close"
+              : "Enter details · c console · s set up key · e edit · Del remove · a add · r refresh · p pause · Esc close"
             color: root.faint
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -909,36 +899,5 @@ Panel {
         }
       }
     }
-
-    ConfirmDialog {
-      id: restartConfirm
-      anchors.fill: parent
-      opened: root.confirmOpened
-      // Starts on Cancel, not the component's own default. A stray Enter
-      // must never be the thing that reboots a machine.
-      selectedIndex: 0
-      message: "Restart " + (root.confirmServer ? root.confirmServer.name : root.confirmId)
-        + "? This runs \"" + (root.confirmServer ? root.confirmServer.rebootCommand : "")
-        + "\" over ssh, in a terminal you can watch."
-      cancelText: "Cancel"
-      confirmText: "Restart"
-      foreground: root.foreground
-      fontFamily: root.fontFamily
-      onCanceled: root.cancelRestart()
-      onConfirmed: root.confirmRestart()
-    }
-
-    Item {
-      id: confirmKeys
-      anchors.fill: parent
-      visible: root.confirmOpened
-      focus: root.confirmOpened
-      Keys.onPressed: function(event) { if (restartConfirm.handleKey(event)) event.accepted = true }
-    }
-  }
-
-  onConfirmOpenedChanged: {
-    if (root.confirmOpened) Qt.callLater(function() { if (root.confirmOpened) confirmKeys.forceActiveFocus() })
-    else Qt.callLater(function() { if (root.opened) keyCatcher.forceActiveFocus() })
   }
 }

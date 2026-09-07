@@ -4,18 +4,18 @@
 bar, and nothing you don't.**
 
 An [Omarchy](https://omarchy.org/) bar plugin for the servers you SSH into.
-Keep a short list, open a console, restart one, and watch live load, RAM and
-uptime per server. No VPN client, no RDP, no agent to install on the far end.
-One server icon, one popup, the ssh commands you would otherwise be typing by
-hand.
+Keep a short list, open a console, and watch live load, RAM and uptime per
+server. It tells you when one drops and when it comes back. No VPN client, no
+RDP, no agent to install on the far end. One server icon, one popup, the ssh
+commands you would otherwise be typing by hand.
 
 ![The Remote servers popup: the add form, one server reading live load and RAM, and one asking for a key](preview.png)
 
 ## What it gives you
 
 - **A list you keep, not a list something else discovers.** Add a server by
-  name and host. Everything else (port, user, identity file, the reboot
-  command, the timeout) is optional and defaults to whatever your own
+  name and host. Everything else (port, user, identity file, the timeout) is
+  optional and defaults to whatever your own
   `~/.ssh/config` or ssh-agent already does for that host.
 - **One button that makes a server work.** A server you have not set up
   key-based auth for says so, and **Set up key** generates a key if you have
@@ -28,10 +28,17 @@ hand.
   normalizes CPU against every core: a number that means "how loaded is this
   machine", not a raw figure that means nothing without knowing the core
   count.
-- **A console and a restart, right on the row.** Connect opens a real,
-  interactive ssh session in a terminal. Restart runs the reboot command you
-  configured (`sudo reboot` by default) behind a confirmation dialog that
-  starts on Cancel, in a terminal you can watch.
+- **A console, right on the row.** Connect opens a real, interactive ssh
+  session in a terminal.
+- **It tells you when a server drops, and when it comes back.** A desktop
+  notification the first time a server stops answering, and another when it
+  answers again. See [Notifications](#notifications).
+- **A stop button.** One click stops every check, and the choice is
+  remembered. See [Stopping the checks](#stopping-the-checks).
+- **It knows the difference between your servers being gone and your network
+  being gone.** With no connection the popup says so once, at the top, and
+  stops reporting every server as unreachable. See
+  [When the network is gone](#when-the-network-is-gone).
 - **Never asks for, stores or forwards a password.** See
   [Privileges and security](#privileges-and-security), the part that actually
   matters.
@@ -87,7 +94,6 @@ file, a `ProxyJump`) keeps working unchanged.
 Port             [ 2222 ]
 User             [ deploy                                  ]
 Identity file    [ ssh-agent, or ~/.ssh/config             ]
-Reboot command   [ sudo reboot                             ]
 Timeout          [ 5 ] seconds
 ```
 
@@ -96,7 +102,6 @@ Timeout          [ 5 ] seconds
 | Port | ssh's own default (22, or whatever `~/.ssh/config` says) | Only needed when it differs and isn't already in `~/.ssh/config`. |
 | User | ssh's own default | Same. |
 | Identity file | ssh's own default (ssh-agent, or `~/.ssh/config`) | The path to a **private SSH key**, not a password. Leave it empty unless you keep a specific key for this server, and use [Set up key](#set-up-key) to make one. |
-| Reboot command | `sudo reboot` | What Restart runs on the server, over ssh. |
 | Timeout | 5 seconds | How long a connection attempt may take before giving up. |
 
 ## Set up key
@@ -122,7 +127,7 @@ itself, with that button already highlighted:
   Set up a key to see load and RAM. Open this row.
 
   ssh deploy@db-01.internal:2222
-  Restart runs: sudo reboot  ·  5s timeout
+  5s connect timeout
 
   Load and RAM are sampled in the background, where a password
   prompt has nowhere to appear, so reading them needs a key.
@@ -149,9 +154,9 @@ After that the row reads normally, and Connect never asks for anything again:
   load 4% · RAM 6.1 / 15.5 GiB · up 12d 4h
 ```
 
-Connect and Restart work without a key too. They open a real terminal, so ssh
-asks for the password there like it always would. It is only the background
-reading that needs one.
+Connect works without a key too. It opens a real terminal, so ssh asks for
+the password there like it always would. It is only the background reading,
+and the notifications that depend on it, that need one.
 
 ## The server list
 
@@ -161,13 +166,12 @@ reading exists, its load/RAM/uptime line. Two buttons sit on the row:
 | | |
 |---|---|
 | **Console button** | Connect, an interactive ssh session in a terminal |
-| **Restart button** | Restart, which asks first, then runs the reboot command in a terminal |
 | **Click the row** | expand it |
 
 ### Expanded row
 
-The exact ssh target, the identity file if one is set, the configured reboot
-command and timeout, and:
+The exact ssh target, the identity file if one is set, the connect timeout,
+and:
 
 | Action | What |
 |---|---|
@@ -197,13 +201,52 @@ widget's settings (20 seconds by default, higher than a local plugin's
 default on purpose, since every sample is a network round trip rather than a
 local call).
 
-## Restarting a server
+## Notifications
 
-Behind a confirmation dialog that names the server, shows the exact command
-that will run, starts on **Cancel**, and only proceeds on an explicit
-Restart. Once confirmed it runs in a terminal you can watch, which is also
-where a sudo password prompt for that reboot command would show up if the
-server needs one.
+The first time a server stops answering, a desktop notification says so. When
+it answers again, another says that. Nothing else is sent: a server that stays
+down is reported once, not on every check.
+
+A server's **first** reading is never a notification. Opening the popup on a
+server that was already unreachable is not news about a change, and treating
+it as one would mean an alert every time you opened the popup.
+
+Two things silence them, because in both cases the plugin does not actually
+know what the server is doing:
+
+- while the checks are stopped, and
+- while the machine itself has no connection, where every server would fail
+  at once and none of those failures would be about the server.
+
+Turn them off entirely with `notifyOnChange` in [Settings](#settings).
+
+## Stopping the checks
+
+The **pause button** next to Refresh stops every check, and `p` does the same
+from the keyboard. The popup says so in a banner, the bar icon dims, and each
+row reads "Checks paused" rather than showing a reading that is no longer
+being taken.
+
+The choice is written to `servers.json`, so it survives a restart of the shell
+rather than quietly resuming behind your back. Press play to start again,
+which also takes a fresh reading immediately.
+
+## When the network is gone
+
+Every server would fail at once, and "these servers are down" and "this
+machine is not on the network" are different problems with different fixes.
+So before touching any server, the plugin checks whether the machine can reach
+the internet at all, the same host Omarchy's own network status probes and the
+same way, so the two agree. With no connection the popup says it once at the
+top and every row reads "No connection, checks paused" rather than each
+claiming an outage of its own.
+
+The probe can be wrong: a server on your LAN answers perfectly well with no
+internet at all, and a captive portal answers everything. So a server that
+*did* answer overrules the probe, and the offline banner never appears while
+anything is still reachable. A probe that cannot run at all, with no `ping`
+installed, reports `unknown` and is treated as online, because a probe that
+could not run must never be the reason a real outage goes unreported.
 
 ## Keyboard
 
@@ -213,16 +256,13 @@ server needs one.
 | `Enter` | expand the selected server |
 | `c` | open a console to it |
 | `s` | set up key-based auth for it |
-| `x` | ask to restart it |
 | `e` | edit it |
 | `Delete` | remove it from the list |
 | `a` | jump to the add-server form |
 | `Tab` | walk the form, More options included |
 | `r` | refresh load/RAM/uptime now |
+| `p` | stop the checks, or start them again |
 | `Esc` | back out one step: a confirmation, then an edit in progress, then More options, then the popup itself |
-
-While the restart confirmation is up it owns the keys: left/right switch the
-answer, `Enter` takes it, `Esc` cancels.
 
 ## Commands
 
@@ -232,13 +272,13 @@ omarchy-shell io.github.majkelll.omarchy-remote-servers list               # a o
 omarchy-shell io.github.majkelll.omarchy-remote-servers refresh            # resample load/RAM/uptime now
 omarchy-shell io.github.majkelll.omarchy-remote-servers connect <name>     # opens a console to it
 omarchy-shell io.github.majkelll.omarchy-remote-servers setupKey <name>    # generates/installs a key for it
-omarchy-shell io.github.majkelll.omarchy-remote-servers restart <name>     # opens the popup and asks, never restarts outright
+omarchy-shell io.github.majkelll.omarchy-remote-servers pause              # stop every check
+omarchy-shell io.github.majkelll.omarchy-remote-servers resume             # start them again
+omarchy-shell io.github.majkelll.omarchy-remote-servers togglePaused       # either way
 ```
 
-`restart` never skips the confirmation dialog. It puts the popup on screen
-and asks, exactly like a click on the row's own button, so a keybinding
-cannot reboot a server without a second step either. `<name>` matches either
-the server's display name or its internal id (shown in `servers.json`).
+`<name>` matches either the server's display name or its internal id (shown
+in `servers.json`).
 
 In `~/.config/hypr/bindings.conf`:
 
@@ -254,6 +294,7 @@ Setup > Plugins.
 | Key | Default | Meaning |
 |---|---|---|
 | `statsRefreshSec` | `20` | Load/RAM/uptime refresh cadence while the popup is open. Not sampled at all while closed. |
+| `notifyOnChange` | `true` | Send a desktop notification when a server drops or comes back. See [Notifications](#notifications). |
 
 ## Where things live
 
@@ -264,6 +305,7 @@ Setup > Plugins.
 ```json
 {
   "version": 1,
+  "paused": false,
   "servers": [
     {
       "id": "prod-web",
@@ -272,12 +314,13 @@ Setup > Plugins.
       "port": 0,
       "user": "",
       "identityFile": "",
-      "rebootCommand": "sudo reboot",
       "connectTimeoutSec": 5
     }
   ]
 }
 ```
+
+`paused` is the stop button, kept here so it survives a restart of the shell.
 
 `port`, `user` and `identityFile` at `""`/`0` mean "let ssh decide": its own
 default, or whatever `~/.ssh/config` already says for that host. A row
@@ -294,11 +337,10 @@ This is the part that matters more than anything else above.
   information about *how to reach* a server (a host, a port, a username, a
   path to a key file you already have), never a secret.
 - **Three different trust models, used on purpose:**
-  - **Connect** and **Restart** open a real, interactive ssh session in a
-    terminal. If a server still needs a password, for ssh itself or for
-    `sudo` inside the reboot command, that terminal is exactly where it
-    belongs: typed directly into ssh's or sudo's own prompt, never seen,
-    captured or relayed by this plugin.
+  - **Connect** opens a real, interactive ssh session in a terminal. If a
+    server still needs a password, that terminal is exactly where it belongs:
+    typed directly into ssh's own prompt, never seen, captured or relayed by
+    this plugin.
   - **Set up key** is the same thing for the one password you should ever
     have to type: `ssh-copy-id` asks for it, in that terminal, once. After
     that nothing needs it again.
@@ -326,12 +368,13 @@ This is the part that matters more than anything else above.
   read straight out of `/proc`. Never copied to disk on the server, never
   marked executable there, no sudo needed. **Set up key** appends one public
   key to `~/.ssh/authorized_keys` and nothing else.
+- **Nothing is ever run on a server that you did not ask for.** The only
+  thing this plugin sends unprompted is the read-only probe. There is no
+  reboot, no shutdown and no remote command of any kind behind a button here:
+  anything that changes a server happens in the console you opened yourself.
 - **No sudo, no pkexec, no polkit, on this side.** Every ssh call is the
-  plain `ssh` CLI, run as your user, using whatever access you already have.
-  Restarting a server that needs `sudo` on the *remote* end is between you
-  and that server's own sudo configuration. This plugin only ever sends the
-  reboot command you configured, exactly once, over the connection you
-  already trust.
+  plain `ssh` CLI, run as your user, using whatever access you already
+  have.
 
 ## Layout
 
@@ -342,7 +385,7 @@ Panel.qml                            the popup: the add/edit form and the server
 Model.js                             parsing, validation and formatting. No QML, no ssh calls
 bin/omarchy-remote-servers-ctl       every ssh invocation, in one place
 bin/omarchy-remote-servers-probe.sh  the read-only probe, piped into the remote shell over stdin
-bin/omarchy-remote-servers-session   what runs inside a terminal: restart, and setting up a key
+bin/omarchy-remote-servers-session   what runs inside a terminal: setting up a key
 tests/model.test.js                  Model.js, under Node's own test runner
 tests/ctl.test.sh                    the helper's arguments, wire format and bounds
 ```
@@ -383,8 +426,9 @@ bash tests/ctl.test.sh     # the helper
 
 `.github/workflows/tests.yml` runs both on every push, plus the helper
 scripts against a real, throwaway sshd: `stats-all` (a reachable and an
-unreachable host, in parallel), a host key that isn't trusted yet, `connect`,
-`restart`, and `setup-key` generating and installing a key for real.
+unreachable host, in parallel, plus its connectivity verdict), a host key that
+isn't trusted yet, `connect`, and `setup-key` generating and installing a key
+for real.
 
 ## License
 
