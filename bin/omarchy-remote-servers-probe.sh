@@ -4,8 +4,8 @@
 # file`. Never copied to disk there, never marked executable. POSIX sh only:
 # the remote's login shell may be dash, busybox ash, or anything else.
 #
-# Prints one \x1f-separated (octal \037) line, all of it from /proc, so no
-# sudo and no extra packages are ever needed on the far end:
+# Prints one \x1f-separated (octal \037) line, all of it from /proc, so it
+# needs no elevated privileges and no extra packages on the far end:
 #   hostname \x1f cores \x1f load1 \x1f memTotalKB \x1f memAvailKB \x1f uptimeSec
 
 set -eu

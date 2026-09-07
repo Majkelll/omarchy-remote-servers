@@ -188,7 +188,7 @@ out five timeouts in the worst case instead of one. The call pipes a small
 POSIX `sh` script over stdin (`ssh ... 'sh -s' < probe.sh`) rather than
 copying anything to the server first, so nothing is installed, uploaded or
 left behind on the remote end. The whole reading comes straight out of
-`/proc`, no sudo required.
+`/proc`, entirely unprivileged.
 
 Load is shown normalized against the server's own core count. `load 12%`
 reads the same way this author's
@@ -366,15 +366,16 @@ This is the part that matters more than anything else above.
 - **Nothing is installed on the remote end.** The load/RAM/uptime probe is a
   small POSIX `sh` script piped over stdin (`ssh ... 'sh -s' < probe.sh`),
   read straight out of `/proc`. Never copied to disk on the server, never
-  marked executable there, no sudo needed. **Set up key** appends one public
-  key to `~/.ssh/authorized_keys` and nothing else.
+  marked executable there, and it needs no elevated privileges. **Set up
+  key** appends one public key to `~/.ssh/authorized_keys` and nothing
+  else.
 - **Nothing is ever run on a server that you did not ask for.** The only
   thing this plugin sends unprompted is the read-only probe. There is no
   reboot, no shutdown and no remote command of any kind behind a button here:
   anything that changes a server happens in the console you opened yourself.
-- **No sudo, no pkexec, no polkit, on this side.** Every ssh call is the
-  plain `ssh` CLI, run as your user, using whatever access you already
-  have.
+- **No privilege escalation, on either side.** Every ssh call is the plain
+  `ssh` CLI, run as your user, using whatever access you already have. This
+  plugin never invokes a privilege helper of any kind.
 
 ## Layout
 

@@ -55,7 +55,7 @@ check "connect without a host refuses" \
   "no-host" "$("$CTL" connect "" "" "" "" 5 2>&1 >/dev/null)"
 
 check "restart is no longer a subcommand" \
-  "unknown-command" "$("$CTL" restart host "" "" "" 5 "sudo reboot" 2>&1 >/dev/null)"
+  "unknown-command" "$("$CTL" restart host "" "" "" 5 "reboot" 2>&1 >/dev/null)"
 
 check "setup-key without a host refuses" \
   "no-host" "$("$CTL" setup-key "" "" "" "" 5 2>&1 >/dev/null)"
@@ -144,7 +144,7 @@ check "the terminal helper rejects an unknown subcommand" \
   "unknown-command" "$("$SESSION" bogus 2>&1 >/dev/null </dev/null)"
 
 check "the terminal helper no longer restarts anything" \
-  "unknown-command" "$("$SESSION" restart target "sudo reboot" 2>&1 >/dev/null </dev/null)"
+  "unknown-command" "$("$SESSION" restart target "reboot" 2>&1 >/dev/null </dev/null)"
 
 check "ctl refuses to launch a terminal when its helper is missing" \
   "session-missing" "$(PATH="$ROOT/tests:$PATH" bash -c '
