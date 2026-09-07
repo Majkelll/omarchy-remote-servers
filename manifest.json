@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.majkelll.omarchy-remote-servers",
+  "name": "Remote servers",
+  "version": "1.0.0",
+  "author": "Majkelll",
+  "license": "MIT",
+  "description": "Keep a list of your own SSH servers in the bar: open a console, restart one, and watch live load/RAM/uptime per server. One button sets up key-based auth, so no password is ever stored or asked for again.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Remote servers",
+    "description": "Connect, restart, and watch load/RAM/uptime for the SSH servers you list.",
+    "category": "System",
+    "aliases": [
+      "ssh",
+      "servers",
+      "remote"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "statsRefreshSec": 20
+    },
+    "schema": [
+      {
+        "key": "statsRefreshSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 10,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 20,
+        "description": "How often load/RAM is sampled over ssh while the popup is open. Not sampled at all while closed. Higher than a local plugin's default on purpose, since each sample is a network round trip rather than a local call."
+      }
+    ]
+  }
+}
