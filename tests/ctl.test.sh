@@ -124,6 +124,38 @@ check "the probe reports a positive core count" \
 check "the probe reports a nonzero total memory" \
   "nonzero" "$([[ $(cut -d$'\037' -f4 <<<"$out") -gt 0 ]] && echo nonzero || echo zero)"
 
+# ------------------------------------------------------------------ limits
+
+# A hostile or faulty server can answer a hundred-byte probe with gigabytes.
+# Both streams are capped where they are read, so nothing downstream is ever
+# asked to hold an unbounded amount of a remote machine's output.
+check "the probe output ceiling is declared" \
+  "yes" "$(grep -q 'MAX_PROBE_BYTES=' "$CTL" && echo yes || echo no)"
+
+check "the stderr ceiling is declared" \
+  "yes" "$(grep -q 'MAX_STDERR_BYTES=' "$CTL" && echo yes || echo no)"
+
+check "stdout is capped where it is read, not after buffering" \
+  "yes" "$(grep -q 'head -c "$((MAX_PROBE_BYTES + 1))"' "$CTL" && echo yes || echo no)"
+
+check "stderr is capped where it is written" \
+  "yes" "$(grep -q 'head -c "$MAX_STDERR_BYTES"' "$CTL" && echo yes || echo no)"
+
+# timeout signals the child's process group, and -k follows TERM with a KILL,
+# so an ssh that spawned anything is reaped rather than left behind.
+check "the probe is killed, not just asked to stop" \
+  "yes" "$(grep -q 'timeout -k 2s' "$CTL" && echo yes || echo no)"
+
+check "an overrun is reported as an error, never half-parsed" \
+  "yes" "$(grep -q 'oversized' "$CTL" && echo yes || echo no)"
+
+# ---------------------------------------------------------------- rendering
+
+# Server names and remote error text reach QML Text elements. Qt's default
+# AutoText would render markup in them, so every sink is pinned to plain text.
+check "every Text in the panel is pinned to plain text" 0 \
+  "$(awk '/^[[:space:]]*Text \{$/ { want = NR + 1 } NR == want && !/textFormat/ { n++ } END { print n + 0 }' "$ROOT/Panel.qml")"
+
 # ---------------------------------------------------------- terminal helper
 
 # omarchy-launch-terminal hands its arguments to xdg-terminal-exec, which

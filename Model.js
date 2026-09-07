@@ -463,6 +463,7 @@ function errorText(code) {
     case "no-host": return "No host given"
     case "auth-failed": return "Key-based auth not set up for this host"
     case "unreachable": return "Could not reach the host"
+    case "oversized": return "The host sent far more than a reading"
     case "timeout": return "Timed out connecting"
     case "terminal-missing": return "No terminal launcher found"
     default: return clean(code)

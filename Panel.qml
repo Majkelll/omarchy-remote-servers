@@ -279,6 +279,7 @@ Panel {
       spacing: Style.spacing.controlGap
 
       Text {
+        textFormat: Text.PlainText
         text: banner.glyph
         color: banner.tone
         font.family: root.fontFamily
@@ -292,6 +293,7 @@ Panel {
         anchors.verticalCenter: parent.verticalCenter
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           text: banner.title
           color: banner.tone
@@ -302,6 +304,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: text !== ""
           width: parent.width
           text: banner.detail
@@ -326,6 +329,7 @@ Panel {
     implicitHeight: Math.max(labelText.implicitHeight, formHolder.childrenRect.height)
 
     Text {
+      textFormat: Text.PlainText
       id: labelText
       text: formRow.label
       color: Qt.darker(root.foreground, 1.4)
@@ -421,6 +425,7 @@ Panel {
 
             iconComponent: Component {
               Text {
+                textFormat: Text.PlainText
                 text: root.paused ? Model.GLYPH.pause
                   : (root.networkOffline ? Model.GLYPH.offline
                     : (root.alarmed ? Model.GLYPH.serverOff : Model.GLYPH.server))
@@ -485,6 +490,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: text !== ""
             width: parent.width
             text: Model.errorText(root.actionError)
@@ -627,6 +633,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "seconds"
                     color: root.dim
                     font.family: root.fontFamily
@@ -638,6 +645,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: text !== ""
               width: parent.width
               text: root.formError
@@ -690,6 +698,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.servers.length === 0
             text: "No servers yet. Add one above."
             color: root.dim
@@ -735,6 +744,7 @@ Panel {
                     implicitHeight: labels.implicitHeight
 
                     Text {
+                      textFormat: Text.PlainText
                       id: dot
                       text: rowEntry.expanded ? "󰅀" : "●"
                       color: root.colorForRow(rowEntry.modelData)
@@ -755,6 +765,7 @@ Panel {
                       spacing: Style.spacing.xxs
 
                       Text {
+                        textFormat: Text.PlainText
                         id: titleText
                         width: parent.width
                         text: rowEntry.modelData.name
@@ -766,6 +777,7 @@ Panel {
                       }
 
                       Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         // Names what fixing it gets you, not just what is
                         // wrong: the fix is one row down, behind a click
@@ -810,6 +822,7 @@ Panel {
                   spacing: Style.spacing.sm
 
                   Text {
+                    textFormat: Text.PlainText
                     width: parent.width
                     text: "ssh " + Model.targetLabel(rowEntry.modelData)
                       + (rowEntry.modelData.identityFile ? "  -i " + rowEntry.modelData.identityFile : "")
@@ -820,6 +833,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     width: parent.width
                     text: rowEntry.modelData.connectTimeoutSec + "s connect timeout"
                     color: root.dim
@@ -831,6 +845,7 @@ Panel {
                   // Said once, where the button is, because "why does this
                   // need a key at all" is the question the button raises.
                   Text {
+                    textFormat: Text.PlainText
                     visible: !root.stale && root.keyUnconfirmed(rowEntry.stat)
                     width: parent.width
                     text: "Load and RAM are sampled in the background, where a "
@@ -886,6 +901,7 @@ Panel {
           // Separator and key/label pairs joined by U+00A0, so the line wraps
           // between hints and never inside one.
           Text {
+            textFormat: Text.PlainText
             text: root.servers.length === 0
               ? "a add · Esc close"
               : "Enter details · c console · s set up key · e edit · Del remove · a add · r refresh · p pause · Esc close"

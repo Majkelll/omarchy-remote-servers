@@ -555,8 +555,9 @@ describe("summary and attentionCount", () => {
 
 describe("errorText", () => {
   test("words every code the helper can emit", () => {
-    for (const code of ["ssh-missing", "timeout-missing", "no-host", "auth-failed",
-      "unreachable", "timeout", "terminal-missing"]) {
+    for (const code of ["ssh-missing", "timeout-missing", "keygen-missing",
+      "copy-id-missing", "session-missing", "no-host", "auth-failed",
+      "unreachable", "timeout", "oversized", "terminal-missing"]) {
       const text = Model.errorText(code)
       assert.notEqual(text, "")
       assert.notEqual(text, code, `${code} should be worded, not passed through`)

@@ -26,6 +26,12 @@ readonly DEFAULT_TIMEOUT=5
 readonly MAX_SERVERS=64
 readonly PROBE_GRACE_SEC=3
 readonly MAX_ERROR_CHARS=200
+# A well behaved probe answers in about a hundred bytes. These are the ceilings
+# a misbehaving or hostile server is held to, applied where the bytes are read
+# rather than after they have been buffered, so nothing downstream can be made
+# to hold an unbounded amount of a remote machine's output.
+readonly MAX_PROBE_BYTES=4096
+readonly MAX_STDERR_BYTES=1024
 # The host Omarchy's own `omarchy-network-status` probes, reached the same way,
 # so this plugin agrees with the network widget about whether you are online.
 # Overridable for networks that blackhole it, and for testing.
@@ -118,6 +124,12 @@ classify_error() {
 # Forced non-interactive. This runs on a timer with nothing on screen, so it
 # must never be able to wait on, or ask for, a password. A host without
 # key-based auth reports "auth-failed" instead of hanging.
+#
+# Both streams are capped as they are read. `head -c` closes the pipe once the
+# ceiling is reached, which sends SIGPIPE up the chain, and a server that
+# overruns it is reported as an error rather than half-parsed. `timeout -k`
+# follows its TERM with a KILL, and timeout signals the child's whole process
+# group, so an ssh that spawned anything is reaped with it.
 probe_one() {
   local enc=$1 probe_script=$2
   local id host port user identity timeout
@@ -134,16 +146,25 @@ probe_one() {
     -o NumberOfPasswordPrompts=0
   )
 
-  local target errfile out status err
+  local target errfile statusfile out status err
   target=$(build_target "$host" "$user")
   errfile=$(mktemp)
-  out=$(timeout "$((timeout + PROBE_GRACE_SEC))" \
-    ssh "${ssh_opts[@]}" -- "$target" 'sh -s' <"$probe_script" 2>"$errfile")
-  status=$?
-  err=$(head -1 "$errfile" 2>/dev/null)
-  rm -f "$errfile"
+  statusfile=$(mktemp)
 
-  if [[ $status -eq 0 && -n $out ]]; then
+  out=$( { timeout -k 2s "$((timeout + PROBE_GRACE_SEC))" \
+      ssh "${ssh_opts[@]}" -- "$target" 'sh -s' <"$probe_script" \
+      2> >(head -c "$MAX_STDERR_BYTES" >"$errfile" 2>/dev/null)
+    printf '%s' "$?" >"$statusfile"; } | head -c "$((MAX_PROBE_BYTES + 1))" )
+
+  # Empty when the reading overran the ceiling and SIGPIPE cut the writer off
+  # before it could record one, which is a failure either way.
+  status=$(cat "$statusfile" 2>/dev/null)
+  err=$(head -1 "$errfile" 2>/dev/null)
+  rm -f "$errfile" "$statusfile"
+
+  if (( ${#out} > MAX_PROBE_BYTES )); then
+    printf '%s%serr%s%s\n' "$id" "$FS" "$FS" "oversized"
+  elif [[ $status == 0 && -n $out ]]; then
     printf '%s%sok%s%s\n' "$id" "$FS" "$FS" "$out"
   else
     printf '%s%serr%s%s\n' "$id" "$FS" "$FS" "$(classify_error "$err")"

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.1 - 2026-09-08
+
+- **A server can no longer make this plugin hold an unbounded amount of its
+  output.** `stats-all` captured a remote process's whole stdout in a command
+  substitution and its stderr in an uncapped temporary file, and the widget
+  buffered the helper's whole result before any truncation applied. A hostile
+  or faulty server could exhaust memory well before the timeout. Both streams
+  are now capped where they are read, an overrun is reported as an error
+  rather than half-parsed, and `timeout -k` follows its TERM with a KILL so an
+  ssh that spawned anything is reaped with it.
+- **Every text sink in the popup renders as plain text.** Server names and
+  remote error strings reach QML `Text` elements, whose default `AutoText`
+  would render markup found in them. All of them are pinned to
+  `Text.PlainText`.
+
+Both reported in the marketplace security review of 1.1.0.
+
 ## 1.1.0 - 2026-09-08
 
 - **Removed: restarting a server.** Nothing here reboots a machine any more.
