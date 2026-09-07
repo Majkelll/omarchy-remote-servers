@@ -1,0 +1,99 @@
+#!/bin/bash
+#
+# The two things this plugin does inside a terminal the user can watch.
+#
+#   restart   <target> <reboot-command> [ssh-option...]
+#   setup-key <target> <identity> <port> <timeout>
+#
+# A file, not a script passed to `bash -c`. omarchy-launch-terminal hands its
+# arguments to xdg-terminal-exec, which re-tokenizes the command the way the
+# desktop-entry spec says to. A script arriving as one long argument goes
+# through that expansion and loses its `${array[@]}`. A path to a file does
+# not, and its arguments arrive verbatim, empty strings and `$` included.
+
+set -uo pipefail
+
+hold() {
+  printf '\n[ press any key to close ]'
+  read -r -n1 -s
+}
+
+cmd_restart() {
+  local target=$1 reboot_cmd=$2
+  shift 2
+
+  echo "Restarting $target ..."
+  ssh "$@" -- "$target" "$reboot_cmd"
+  local status=$?
+  echo
+
+  if [[ $status -eq 0 ]]; then
+    echo "Reboot command sent. The connection drops as the host goes down."
+  else
+    echo "ssh exited with status $status."
+  fi
+  hold
+}
+
+cmd_setup_key() {
+  local target=$1 identity=$2 port=$3 timeout=$4
+
+  local key=${identity:-$HOME/.ssh/id_ed25519}
+  case "$key" in "~/"*) key="$HOME/${key#\~/}" ;; esac
+  mkdir -p -m 700 "$(dirname "$key")" || { hold; return 1; }
+
+  if [[ ! -e $key && ! -e $key.pub ]]; then
+    echo "No key at $key yet. Making one now; nothing is overwritten."
+    ssh-keygen -t ed25519 -f "$key" -N "" -C "omarchy-remote-servers" || { hold; return 1; }
+    echo
+  elif [[ ! -e $key.pub ]]; then
+    echo "Recovering $key.pub from the private key."
+    ssh-keygen -y -f "$key" > "$key.pub" || { hold; return 1; }
+    echo
+  fi
+
+  echo "Copying $key.pub to $target."
+  echo "That account's password is asked for once, by ssh-copy-id itself."
+  echo "It is used only for this copy and is never stored anywhere."
+  echo
+
+  local -a opts=(-o "ConnectTimeout=$timeout")
+  [[ -n $port ]] && opts+=(-p "$port")
+
+  ssh-copy-id -i "$key.pub" "${opts[@]}" -- "$target"
+  local status=$?
+  echo
+
+  if [[ $status -ne 0 ]]; then
+    echo "ssh-copy-id exited with status $status. Nothing was changed here."
+    hold
+    return 1
+  fi
+
+  # IdentitiesOnly, so this proves the key just copied works rather than
+  # some other key already loaded in the agent.
+  echo "Checking it worked, without a password this time ..."
+  if ssh -o BatchMode=yes -o IdentitiesOnly=yes "${opts[@]}" -i "$key" -- "$target" true 2>&1; then
+    echo "Done. Connect and the load/RAM/uptime reading both work from now on."
+  else
+    echo "The key was copied, but a key-only login still did not work."
+    echo "The server may not allow key auth, or may want the key elsewhere."
+  fi
+  hold
+}
+
+main() {
+  local cmd=${1:-}
+  [[ $# -gt 0 ]] && shift
+
+  case "$cmd" in
+    restart) cmd_restart "$@" ;;
+    setup-key) cmd_setup_key "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
+    *)
+      printf 'unknown-command\n' >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

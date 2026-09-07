@@ -1,0 +1,199 @@
+#!/bin/bash
+#
+# The only place this plugin talks to ssh. Fields in and out are joined by
+# \x1f (unit separator), never a space or tab, so a host or name is free to
+# contain either. An empty field means "let ssh decide": its own
+# ~/.ssh/config, its own default port, its own default identity.
+#
+#   connect   <host> <port> <user> <identity> <timeout>
+#   restart   <host> <port> <user> <identity> <timeout> <reboot-command>
+#   setup-key <host> <port> <user> <identity> <timeout>
+#   stats-all <probe-script> <server>...
+#
+# `stats-all` takes each server as id\x1fhost\x1fport\x1fuser\x1fidentity\x1ftimeout
+# in one argv element, and prints one line per server in whatever order they
+# finish:
+#   id \x1f ok  \x1f hostname \x1f cores \x1f load1 \x1f memTotalKB \x1f memAvailKB \x1f uptimeSec
+#   id \x1f err \x1f code
+
+set -uo pipefail
+
+readonly FS=$'\x1f'
+readonly HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+readonly SESSION="$HERE/omarchy-remote-servers-session"
+readonly DEFAULT_TIMEOUT=5
+readonly MAX_SERVERS=64
+readonly PROBE_GRACE_SEC=3
+readonly MAX_ERROR_CHARS=200
+
+die() {
+  printf '%s\n' "$1" >&2
+  exit 1
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || die "$2"
+}
+
+build_target() {
+  local host=$1 user=$2
+  if [[ -n $user ]]; then printf '%s@%s' "$user" "$host"; else printf '%s' "$host"; fi
+}
+
+valid_timeout() {
+  local t=$1
+  if [[ $t =~ ^[0-9]+$ && $t -ge 1 ]]; then printf '%s' "$t"; else printf '%s' "$DEFAULT_TIMEOUT"; fi
+}
+
+# Populates the caller's `ssh_opts` array.
+build_ssh_opts() {
+  local port=$1 identity=$2 timeout=$3
+  ssh_opts=(-o "ConnectTimeout=${timeout}")
+  [[ -n $port ]] && ssh_opts+=(-p "$port")
+  [[ -n $identity ]] && ssh_opts+=(-i "$identity")
+  return 0
+}
+
+# ------------------------------------------------------------------- connect
+
+# No BatchMode. An interactive terminal is where a password prompt or a
+# first-time host key confirmation belongs, typed straight into ssh's own
+# prompt rather than captured here.
+cmd_connect() {
+  local host=$1 port=$2 user=$3 identity=$4 timeout=$5
+  require ssh ssh-missing
+  [[ -n $host ]] || die "no-host"
+  require omarchy-launch-terminal terminal-missing
+
+  local target
+  target=$(build_target "$host" "$user")
+
+  local -a ssh_opts
+  build_ssh_opts "$port" "$identity" "$(valid_timeout "$timeout")"
+
+  omarchy-launch-terminal -- ssh "${ssh_opts[@]}" -- "$target" &
+  disown
+}
+
+# ------------------------------------------------------------------- restart
+
+cmd_restart() {
+  local host=$1 port=$2 user=$3 identity=$4 timeout=$5 reboot_cmd=$6
+  require ssh ssh-missing
+  [[ -n $host ]] || die "no-host"
+  [[ -n $reboot_cmd ]] || die "no-command"
+  require omarchy-launch-terminal terminal-missing
+  [[ -x $SESSION ]] || die "session-missing"
+
+  local target
+  target=$(build_target "$host" "$user")
+
+  local -a ssh_opts
+  build_ssh_opts "$port" "$identity" "$(valid_timeout "$timeout")"
+
+  omarchy-launch-terminal -- "$SESSION" restart "$target" "$reboot_cmd" "${ssh_opts[@]}" &
+  disown
+}
+
+# ----------------------------------------------------------------- setup-key
+
+# The one action that makes every other one work without a password. Runs in
+# a real terminal because the account's existing password is asked for there,
+# once, by ssh-copy-id itself. Never by this plugin, and never stored.
+cmd_setup_key() {
+  local host=$1 port=$2 user=$3 identity=$4 timeout=$5
+  require ssh ssh-missing
+  require ssh-keygen keygen-missing
+  require ssh-copy-id copy-id-missing
+  [[ -n $host ]] || die "no-host"
+  require omarchy-launch-terminal terminal-missing
+  [[ -x $SESSION ]] || die "session-missing"
+
+  local target
+  target=$(build_target "$host" "$user")
+
+  omarchy-launch-terminal -- "$SESSION" setup-key \
+    "$target" "$identity" "$port" "$(valid_timeout "$timeout")" &
+  disown
+}
+
+# ----------------------------------------------------------------- stats-all
+
+classify_error() {
+  case "$1" in
+    *"Permission denied"* | *"publickey"*) printf 'auth-failed' ;;
+    *"timed out"* | *"Timeout"*) printf 'timeout' ;;
+    *"Connection refused"* | *"No route to host"* | *"Could not resolve"* | *"Name or service not known"*)
+      printf 'unreachable' ;;
+    "") printf 'unreachable' ;;
+    *) printf '%s' "$1" | tr '\037\012' '  ' | cut -c1-"$MAX_ERROR_CHARS" ;;
+  esac
+}
+
+# Forced non-interactive. This runs on a timer with nothing on screen, so it
+# must never be able to wait on, or ask for, a password. A host without
+# key-based auth reports "auth-failed" instead of hanging.
+probe_one() {
+  local enc=$1 probe_script=$2
+  local id host port user identity timeout
+  IFS="$FS" read -r id host port user identity timeout <<<"$enc"
+  [[ -n $id && -n $host ]] || return 0
+
+  timeout=$(valid_timeout "$timeout")
+
+  local -a ssh_opts
+  build_ssh_opts "$port" "$identity" "$timeout"
+  ssh_opts+=(
+    -o BatchMode=yes
+    -o ConnectionAttempts=1
+    -o NumberOfPasswordPrompts=0
+  )
+
+  local target errfile out status err
+  target=$(build_target "$host" "$user")
+  errfile=$(mktemp)
+  out=$(timeout "$((timeout + PROBE_GRACE_SEC))" \
+    ssh "${ssh_opts[@]}" -- "$target" 'sh -s' <"$probe_script" 2>"$errfile")
+  status=$?
+  err=$(head -1 "$errfile" 2>/dev/null)
+  rm -f "$errfile"
+
+  if [[ $status -eq 0 && -n $out ]]; then
+    printf '%s%sok%s%s\n' "$id" "$FS" "$FS" "$out"
+  else
+    printf '%s%serr%s%s\n' "$id" "$FS" "$FS" "$(classify_error "$err")"
+  fi
+}
+
+cmd_stats_all() {
+  local probe_script=${1:-}
+  [[ $# -gt 0 ]] && shift
+  require ssh ssh-missing
+  require timeout timeout-missing
+  [[ -f $probe_script ]] || die "probe-missing"
+
+  local count=0 enc
+  for enc in "$@"; do
+    count=$((count + 1))
+    [[ $count -gt $MAX_SERVERS ]] && break
+    probe_one "$enc" "$probe_script" &
+  done
+  wait
+}
+
+# ---------------------------------------------------------------------- main
+
+main() {
+  local cmd=${1:-}
+  [[ $# -gt 0 ]] && shift
+
+  case "$cmd" in
+    connect) cmd_connect "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+    restart) cmd_restart "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
+    setup-key) cmd_setup_key "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+    stats-all) cmd_stats_all "$@" ;;
+    *) die "unknown-command" ;;
+  esac
+}
+
+main "$@"
