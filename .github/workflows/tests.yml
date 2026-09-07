@@ -1,0 +1,163 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Model tests
+        run: node tests/model.test.js
+
+      - name: Helper scripts parse
+        run: |
+          bash -n bin/omarchy-remote-servers-ctl
+          bash -n bin/omarchy-remote-servers-session
+          sh -n bin/omarchy-remote-servers-probe.sh
+          bash -n tests/ctl.test.sh
+
+      # The plugin runs both directly. A lost mode bit would break every
+      # action with a permission error and nothing else would notice.
+      - name: Helper scripts are executable
+        run: |
+          test -x bin/omarchy-remote-servers-ctl
+          test -x bin/omarchy-remote-servers-probe.sh
+          test -x bin/omarchy-remote-servers-session
+
+      - name: Manifest is valid JSON
+        run: node -e "JSON.parse(require('fs').readFileSync('manifest.json', 'utf8'))"
+
+      # A manifest can name a file that no longer exists and still parse.
+      - name: Manifest entry points exist
+        run: |
+          node -e "
+            const fs = require('fs');
+            const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+            for (const [kind, file] of Object.entries(m.entryPoints || {})) {
+              if (!fs.existsSync(file)) throw new Error(kind + ' entry point missing: ' + file);
+            }
+          "
+
+      - name: Helper tests
+        run: bash tests/ctl.test.sh
+
+      # A real sshd on a scratch keypair the runner throws away afterward, so
+      # every subcommand is exercised against an actual ssh handshake rather
+      # than a mock. `omarchy-launch-terminal` is faked to run whatever it was
+      # given, since a CI runner has no terminal emulator. Everything up to
+      # that point, the ssh invocation included, is real.
+      - name: ssh integration
+        run: |
+          set -euo pipefail
+          command -v /usr/sbin/sshd >/dev/null || sudo apt-get install -y --no-install-recommends openssh-server
+          WORK=$(mktemp -d)
+          ssh-keygen -t ed25519 -f "$WORK/hostkey" -N '' -q
+          ssh-keygen -t ed25519 -f "$WORK/clientkey" -N '' -q
+
+          # The default authorized-keys path on purpose: setup-key's whole job
+          # is to install a key where a real sshd looks for it, and pointing
+          # the test server somewhere else would test nothing.
+          mkdir -p -m 700 ~/.ssh
+          cat "$WORK/clientkey.pub" >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+
+          cat > "$WORK/sshd_config" <<CFG
+          Port 2299
+          ListenAddress 127.0.0.1
+          HostKey $WORK/hostkey
+          AuthorizedKeysFile .ssh/authorized_keys
+          PidFile $WORK/sshd.pid
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          UsePAM no
+          StrictModes no
+          LogLevel ERROR
+          Subsystem sftp none
+          CFG
+
+          /usr/sbin/sshd -f "$WORK/sshd_config" -D &
+          SSHD_PID=$!
+          trap 'kill $SSHD_PID 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 20); do
+            ss -ltn 2>/dev/null | grep -q ':2299 ' && break
+            sleep 0.2
+          done
+          ss -ltn | grep -q ':2299 '
+
+          mkdir -p -m 700 ~/.ssh
+          ssh-keyscan -p 2299 127.0.0.1 2>/dev/null >> ~/.ssh/known_hosts
+
+          mkdir -p "$WORK/fakebin"
+          cat > "$WORK/fakebin/omarchy-launch-terminal" <<'SHIM'
+          #!/bin/bash
+          shift # drop "--"
+          exec "$@"
+          SHIM
+          chmod +x "$WORK/fakebin/omarchy-launch-terminal"
+          export PATH="$WORK/fakebin:$PATH"
+
+          CTL=./bin/omarchy-remote-servers-ctl
+          PROBE=./bin/omarchy-remote-servers-probe.sh
+
+          echo "--- stats-all: reachable + unreachable, in parallel, bounded ---"
+          enc_ok=$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' "ok1" "127.0.0.1" "2299" "" "$WORK/clientkey" "3")
+          enc_bad=$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' "bad1" "127.0.0.1" "2399" "" "" "2")
+          out=$(timeout 15 "$CTL" stats-all "$PROBE" "$enc_ok" "$enc_bad")
+          echo "$out"
+          grep -qP '^ok1\x1fok\x1f' <<<"$out"
+          grep -qP '^bad1\x1ferr\x1funreachable$' <<<"$out"
+
+          # The reachable line must carry every field Model.parseStatsAll needs.
+          fields=$(grep -P '^ok1\x1f' <<<"$out" | awk -F'\x1f' '{print NF}')
+          test "$fields" -eq 8
+
+          # Same server, reached under a name that is not in known_hosts.
+          # BatchMode must make that fail rather than trust it silently.
+          echo "--- an unknown host key never reports ok ---"
+          enc_unknown=$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' "u1" "localhost" "2299" "" "$WORK/clientkey" "3")
+          out=$(timeout 15 "$CTL" stats-all "$PROBE" "$enc_unknown")
+          echo "$out"
+          grep -qP '^u1\x1ferr\x1f' <<<"$out"
+
+          echo "--- connect: builds the right ssh invocation ---"
+          out=$("$CTL" connect 127.0.0.1 2299 "" "$WORK/clientkey" 3 </dev/null 2>&1 || true)
+          echo "$out"
+
+          echo "--- restart: runs the configured command over ssh, then waits for a key ---"
+          out=$("$CTL" restart 127.0.0.1 2299 "" "$WORK/clientkey" 3 "echo integration-test-ok" </dev/null)
+          echo "$out"
+          grep -q "integration-test-ok" <<<"$out"
+          grep -q "press any key to close" <<<"$out"
+
+          # setup-key generates a key that does not exist yet and installs it.
+          # The agent holds the key that authorizes the copy; the check inside
+          # setup-key uses IdentitiesOnly, so only the new key can pass it.
+          echo "--- setup-key: generates a missing key and installs it ---"
+          eval "$(ssh-agent -s)"
+          ssh-add "$WORK/clientkey"
+
+          test ! -e "$WORK/newkey"
+          out=$("$CTL" setup-key 127.0.0.1 2299 "" "$WORK/newkey" 3 </dev/null 2>&1)
+          echo "$out"
+          test -f "$WORK/newkey"
+          test -f "$WORK/newkey.pub"
+          grep -q "Done." <<<"$out"
+          grep -qF "$(cut -d' ' -f2 "$WORK/newkey.pub")" ~/.ssh/authorized_keys
+
+          # Running it again must not overwrite the key it made the first time.
+          before=$(sha256sum "$WORK/newkey")
+          "$CTL" setup-key 127.0.0.1 2299 "" "$WORK/newkey" 3 </dev/null >/dev/null 2>&1
+          test "$before" = "$(sha256sum "$WORK/newkey")"
+
+          ssh-agent -k >/dev/null
