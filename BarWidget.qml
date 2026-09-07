@@ -185,24 +185,36 @@ BarWidget {
   }
 
   function applyStats(text, code) {
+    // A probe already running when the checks stopped still finishes. Landing
+    // it would move numbers, and possibly raise an alert, after the point the
+    // user asked for nothing further to happen.
+    if (root.paused) return
     if (code !== 0 && text === "") return
+
     var parsed = Model.parseStatsAll(text)
     var network = Model.parseNetwork(text)
     var offline = Model.batchWasOffline(network, parsed)
+
+    root.networkOffline = offline
+    root.networkDetail = offline ? network.detail : ""
+
+    // Offline, every server failed at once and not one of those failures is
+    // about the server. Keeping the last readings rather than overwriting them
+    // with that batch is also what stops the network coming back from looking
+    // like every server recovering at once.
+    if (offline) {
+      root.injectPanel()
+      return
+    }
 
     var previous = root.stats
     var next = {}
     for (var key in previous) next[key] = previous[key]
     for (var id in parsed) next[id] = parsed[id]
-
-    root.networkOffline = offline
-    root.networkDetail = offline ? network.detail : ""
     root.stats = next
     root.injectPanel()
 
-    // With the machine itself offline every server fails at once, and none of
-    // those failures is news about the server.
-    if (!offline) root.announce(Model.transitions(previous, next, root.servers))
+    root.announce(Model.transitions(previous, next, root.servers))
   }
 
   // ----------------------------------------------------------- notifications

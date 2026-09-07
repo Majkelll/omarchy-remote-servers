@@ -456,6 +456,15 @@ describe("transitions", () => {
     assert.deepEqual(Model.transitions({}, { a: up }, servers), [])
   })
 
+  // The offline batch is never written to the stats, so the network coming
+  // back can never read as every server recovering at once.
+  test("a whole batch flipping at once is still reported per server", () => {
+    const two = [{ id: "a", name: "a", host: "a" }, { id: "b", name: "b", host: "b" }]
+    const out = Model.transitions({ a: up, b: up }, { a: down, b: down }, two)
+    assert.equal(out.length, 2)
+    assert.deepEqual(out.map(c => c.transition), ["down", "down"])
+  })
+
   test("ignores a server that is no longer on the list", () => {
     assert.deepEqual(Model.transitions({ z: up }, { z: down }, servers), [])
     assert.deepEqual(Model.transitions(null, null, null), [])

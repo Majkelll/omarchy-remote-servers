@@ -82,6 +82,7 @@ Panel {
   readonly property bool stale: root.paused || root.networkOffline
   readonly property int attentionCount:
     Model.attentionCount(root.servers, root.stats, root.paused, root.networkOffline)
+  readonly property bool alarmed: root.configError !== "" || root.attentionCount > 0
 
   function toggleExpanded(id) {
     if (root.editingId !== "") return
@@ -417,8 +418,6 @@ Panel {
               : Model.summary(root.servers, root.stats, root.paused, root.networkOffline)
             foreground: root.foreground
             fontFamily: root.fontFamily
-
-            readonly property bool alarmed: root.configError !== "" || root.attentionCount > 0
 
             iconComponent: Component {
               Text {
